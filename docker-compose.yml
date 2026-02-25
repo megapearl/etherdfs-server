@@ -1,7 +1,7 @@
 services:
   etherdfs:
     build: .
-    container_name: etherdfs-server
+    container_name: ethersrv-linux
     # Critical: Use host networking to allow raw socket access (L2 frames)
     network_mode: host
     # Privilege required to open raw network sockets
@@ -12,5 +12,5 @@ services:
       # Map your host dataset where DOS games/files reside to /data
       - /mnt/storage/retro:/data
     # Replace 'vlan2' with your actual TrueNAS network interface if needed
-    command: ethersrv -f vlan2 /data
+    command: ethersrv-linux -f vlan2 /data
     restart: unless-stopped
