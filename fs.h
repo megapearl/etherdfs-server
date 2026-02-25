@@ -6,24 +6,24 @@
 #define FS_H_SENTINEL
 
 struct fileprops {
-  char fcbname[12];  /* FCB-style file name (FILE0001TXT) */
+  char fcbname[12]; /* FCB-style file name (FILE0001TXT) */
   unsigned long fsize;
   unsigned long ftime;
   unsigned char fattr;
 };
 
 /* DOS/FAT attribs: 1=RO 2=HID 4=SYS 8=VOL 16=DIR 32=ARCH 64=DEVICE */
-#define FAT_RO   1
-#define FAT_HID  2
-#define FAT_SYS  4
-#define FAT_VOL  8
+#define FAT_RO 1
+#define FAT_HID 2
+#define FAT_SYS 4
+#define FAT_VOL 8
 #define FAT_DIR 16
 #define FAT_ARC 32
 #define FAT_DEV 64
 
 /* flags used with findfile() calls */
 #define FFILE_ISROOT 1
-#define FFILE_ISFAT  2
+#define FFILE_ISFAT 2
 
 /* returns the "start sector" of a filesystem item (file or directory).
  * returns 0xffff on error */
@@ -35,21 +35,31 @@ char *sstoitem(unsigned short ss);
 char upchar(char c);
 
 /* translates a filename string into a fcb-style block ("FILE0001TXT") */
-void filename2fcb(char *d, char *s);
+void filename2fcb(char *d, const char *s);
+
+/* translates a long filename string into an 8.3 format SFN */
+void lfn2sfn(char *sfn, const char *lfn, int collision_idx);
 
 /* provides DOS-like attributes for item i, as well as size, filling fprops
  * accordingly. returns item's attributes or 0xff on error.
  * DOS attr flags: 1=RO 2=HID 4=SYS 8=VOL 16=DIR 32=ARCH 64=DEVICE */
-unsigned char getitemattr(char *i, struct fileprops *fprops, unsigned char isfat);
+unsigned char getitemattr(char *i, struct fileprops *fprops,
+                          unsigned char isfat);
 
 /* set attributes fattr on file i. returns 0 on success, non-zero otherwise. */
 int setitemattr(char *i, unsigned char fattr);
 
-/* searches for file matching template tmpl in directory dss (dss is the starting sector of the directory, as obtained via getitemss) with attribute attr, fills 'out' with the nth match. returns 0 on success, non-zero otherwise. */
-int findfile(struct fileprops *f, unsigned short dss, char *tmpl, unsigned char attr, unsigned short *fpos, int flags);
+/* searches for file matching template tmpl in directory dss (dss is the
+ * starting sector of the directory, as obtained via getitemss) with attribute
+ * attr, fills 'out' with the nth match. returns 0 on success, non-zero
+ * otherwise. */
+int findfile(struct fileprops *f, unsigned short dss, char *tmpl,
+             unsigned char attr, unsigned short *fpos, int flags);
 
-/* creates or truncates a file f in directory d with attributes attr. returns 0 on success (and f filled), non-zero otherwise. */
-int createfile(struct fileprops *f, char *d, char *fn, unsigned char attr, unsigned char fatflag);
+/* creates or truncates a file f in directory d with attributes attr. returns 0
+ * on success (and f filled), non-zero otherwise. */
+int createfile(struct fileprops *f, char *d, char *fn, unsigned char attr,
+               unsigned char fatflag);
 
 /* returns disks total size, in bytes, or 0 on error. also sets dfree to the
  * amount of available bytes */
@@ -67,23 +77,30 @@ int changedir(char *d);
 
 /* reads len bytes from file fname starting offset, writes to buff. returns
  * amount of bytes read or a negative value on error. */
-long readfile(unsigned char *buff, unsigned short fss, unsigned long offset, unsigned short len);
+long readfile(unsigned char *buff, unsigned short fss, unsigned long offset,
+              unsigned short len);
 
 /* writes len bytes from buff to file fname, starting at offset. returns
  * amount of bytes written or a negative value on error. */
-long writefile(unsigned char *buff, unsigned short fss, unsigned long offset, unsigned short len);
+long writefile(unsigned char *buff, unsigned short fss, unsigned long offset,
+               unsigned short len);
 
-/* remove all files matching the pattern, returns the number of removed files if any found,
- * or -1 on error or if no matching file found */
+/* remove all files matching the pattern, returns the number of removed files if
+ * any found, or -1 on error or if no matching file found */
 int delfiles(char *pattern);
 
 /* rename fn1 into fn2 */
 int renfile(char *fn1, char *fn2);
 
-/* checks if a path resides on a FAT filesystem, returns 0 if so, non-zero otherwise */
+/* checks if a path resides on a FAT filesystem, returns 0 if so, non-zero
+ * otherwise */
 int isfat(char *d);
 
 /* returns the size of an open file (or -1 on error) */
 long getfopsize(unsigned short fss);
+
+/* resolve_path intercepts paths coming from DOS and translates SFNs back to
+ * real LFNs */
+void resolve_path(char *resolved_path, const char *root, const char *dos_path);
 
 #endif

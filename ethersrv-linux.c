@@ -45,7 +45,6 @@
 #include <time.h>   /* time() */
 #include <unistd.h> /* close(), getopt(), optind */
 
-
 #include "debug.h"
 #include "fs.h"
 #include "lock.h"
@@ -326,19 +325,30 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
     char directory[256];
     unsigned short dirss;
     char filemask[16], filemaskfcb[12];
-    int offset;
     unsigned fattr;
     unsigned short fpos = 0;
     int flags;
     fattr = reqbuff[0];
-    offset = sprintf(directory, "%s/", root);
-    /* */
-    /* explode the full "\DIR\FILE????.???" search path into directory and mask
-     */
-    explodepath(directory + offset, filemask, (char *)reqbuff + 1,
-                reqbufflen - 1);
-    lostring(directory + offset, -1);
-    lostring(filemask, -1);
+    fattr = reqbuff[0];
+    /* resolve the search path (directory part) */
+    {
+      char dos_search_path[256];
+      char resolved_dir[512];
+      memcpy(dos_search_path, (char *)reqbuff + 1, reqbufflen - 1);
+      dos_search_path[reqbufflen - 1] = 0;
+      lostring(dos_search_path, -1);
+      charreplace(dos_search_path, '\\', '/');
+
+      /* explode the full "\DIR\FILE????.???" search path into directory and
+       * mask */
+      explodepath(directory, filemask, dos_search_path,
+                  strlen(dos_search_path));
+
+      /* Map the DOS directory path to actual Linux path */
+      resolve_path(resolved_dir, root, directory);
+      strcpy(directory, resolved_dir);
+    }
+
     charreplace(directory, '\\', '/');
     /* */
     filename2fcb(filemaskfcb, filemask);
@@ -417,15 +427,23 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
       reslen = 24;
     }
   } else if ((query == AL_MKDIR) || (query == AL_RMDIR)) { /* MKDIR or RMDIR */
-    char directory[256];
-    int offset;
-    offset = sprintf(directory, "%s/", root);
-    /* explode the full "\DIR\FILE????.???" search path into directory and mask
-     */
-    memcpy(directory + offset, (char *)reqbuff, reqbufflen);
-    directory[offset + reqbufflen] = 0;
-    lostring(directory + offset, -1);
-    charreplace(directory, '\\', '/');
+    char directory[512];
+    char dos_dir[256];
+
+    memcpy(dos_dir, (char *)reqbuff, reqbufflen);
+    dos_dir[reqbufflen] = 0;
+    lostring(dos_dir, -1);
+    charreplace(dos_dir, '\\', '/');
+
+    if (query == AL_RMDIR) {
+      resolve_path(directory, root, dos_dir);
+    } else {
+      /* MKDIR: resolve parent, append new name.
+         A simple resolve_path might just return the SFN if the dir doesn't
+         exist, which is actually correct since MKDIR should create what DOS
+         asked for */
+      resolve_path(directory, root, dos_dir);
+    }
     if (query == AL_MKDIR) {
       DBG("MKDIR '%s'\n", directory);
       if (makedir(directory) != 0) {
@@ -441,13 +459,15 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
     }
   } else if (query == AL_CHDIR) { /* check if dir exist, return ax=0 if so, ax=3
                                      otherwise */
-    char directory[256];
-    int offset;
-    offset = sprintf(directory, "%s/", root);
-    memcpy(directory + offset, (char *)reqbuff, reqbufflen);
-    directory[offset + reqbufflen] = 0;
-    lostring(directory + offset, -1);
-    charreplace(directory, '\\', '/');
+    char directory[512];
+    char dos_dir[256];
+
+    memcpy(dos_dir, (char *)reqbuff, reqbufflen);
+    dos_dir[reqbufflen] = 0;
+    lostring(dos_dir, -1);
+    charreplace(dos_dir, '\\', '/');
+
+    resolve_path(directory, root, dos_dir);
     DBG("CHDIR '%s'\n", directory);
     /* try to chdir to this dir - if works, then we're good */
     if (changedir(directory) != 0) {
@@ -462,15 +482,17 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
   } else if ((query == AL_SETATTR) &&
              (reqbufflen > 1)) { /* AL_SETATTR (0x0E) */
     char fname[512];
-    int offset;
+    char dos_fname[256];
     unsigned char fattr;
     fattr = reqbuff[0];
+
     /* get full file path */
-    offset = sprintf(fname, "%s/", root);
-    memcpy(fname + offset, (char *)reqbuff + 1, reqbufflen - 1);
-    fname[offset + reqbufflen - 1] = 0;
-    lostring(fname + offset, -1);
-    charreplace(fname, '\\', '/');
+    memcpy(dos_fname, (char *)reqbuff + 1, reqbufflen - 1);
+    dos_fname[reqbufflen - 1] = 0;
+    lostring(dos_fname, -1);
+    charreplace(dos_fname, '\\', '/');
+
+    resolve_path(fname, root, dos_fname);
     DBG("SETATTR [file: '%s', attr: 0x%02X]\n", fname, fattr);
     /* set attr, but only if drive is FAT */
     if (drivesfat[reqdrv] != 0) {
@@ -480,14 +502,16 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
   } else if ((query == AL_GETATTR) &&
              (reqbufflen > 0)) { /* AL_GETATTR (0x0F) */
     char fname[512];
-    int offset;
+    char dos_fname[256];
     struct fileprops fprops;
+
     /* get full file path */
-    offset = sprintf(fname, "%s/", root);
-    memcpy(fname + offset, (char *)reqbuff, reqbufflen);
-    fname[offset + reqbufflen] = 0;
-    lostring(fname + offset, -1);
-    charreplace(fname, '\\', '/');
+    memcpy(dos_fname, (char *)reqbuff, reqbufflen);
+    dos_fname[reqbufflen] = 0;
+    lostring(dos_fname, -1);
+    charreplace(dos_fname, '\\', '/');
+
+    resolve_path(fname, root, dos_fname);
     DBG("GETATTR on file: '%s' (fatflag=%d)\n", fname, drivesfat[reqdrv]);
     /* */
     if (getitemattr(fname, &fprops, drivesfat[reqdrv]) == 0xFF) {
@@ -537,13 +561,15 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
     }
   } else if (query == AL_DELETE) {
     char fullpathname[512];
-    int offset;
+    char dos_fname[256];
+
     /* compute full path/file first */
-    offset = sprintf(fullpathname, "%s/", root);
-    memcpy(fullpathname + offset, reqbuff, reqbufflen);
-    fullpathname[reqbufflen + offset] = 0;
-    lostring(fullpathname + offset, -1);
-    charreplace(fullpathname, '\\', '/');
+    memcpy(dos_fname, reqbuff, reqbufflen);
+    dos_fname[reqbufflen] = 0;
+    lostring(dos_fname, -1);
+    charreplace(dos_fname, '\\', '/');
+
+    resolve_path(fullpathname, root, dos_fname);
     DBG("DELETE '%s'\n", fullpathname);
     /* is it read-only? */
     if (getitemattr(fullpathname, NULL, drivesfat[reqdrv]) & 1) {
@@ -561,26 +587,31 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
     char directory[256];
     char fname[16], fnamefcb[12];
     char fullpathname[512];
-    int offset;
     int fileres;
     unsigned short stackattr, actioncode, spopen_openmode, spopres = 0;
     unsigned char resopenmode;
+    char dos_full[256];
+    char dos_dir[256];
     /* fetch args */
     stackattr = le16toh(wreqbuff[0]);
     actioncode = le16toh(wreqbuff[1]);
     spopen_openmode = le16toh(wreqbuff[2]);
-    /* compute full path/file */
-    offset = sprintf(fullpathname, "%s/", root);
-    memcpy(fullpathname + offset, reqbuff + 6, reqbufflen - 6);
-    fullpathname[reqbufflen + offset - 6] = 0;
-    lostring(fullpathname + offset, -1);
-    charreplace(fullpathname, '\\', '/');
-    /* compute directory and 'search mask' */
-    offset = sprintf(directory, "%s/", root);
-    explodepath(directory + offset, fname, (char *)reqbuff + 6, reqbufflen - 6);
-    lostring(directory + offset, -1);
-    lostring(fname, -1);
-    charreplace(directory, '\\', '/');
+
+    /* decode DOS path */
+    memcpy(dos_full, reqbuff + 6, reqbufflen - 6);
+    dos_full[reqbufflen - 6] = 0;
+    lostring(dos_full, -1);
+    charreplace(dos_full, '\\', '/');
+
+    /* resolve full path */
+    resolve_path(fullpathname, root, dos_full);
+
+    /* compute directory and 'search mask' using DOS path instead of
+     * root-prefixed path */
+    explodepath(dos_dir, fname, dos_full, strlen(dos_full));
+
+    /* resolve the parent directory specifically */
+    resolve_path(directory, root, dos_dir);
     /* does the directory exist? */
     if (changedir(directory) != 0) {
       DBG("open/create/spop failed because directory does not exist\n");
