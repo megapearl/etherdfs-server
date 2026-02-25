@@ -110,6 +110,12 @@ void lfn2sfn(char *sfn, const char *lfn, int collision_idx) {
   char extn[4] = {0};
   char extptr[256];
 
+  /* explicitly preserve '.' and '..' */
+  if (strcmp(lfn, ".") == 0 || strcmp(lfn, "..") == 0) {
+    strcpy(sfn, lfn);
+    return;
+  }
+
   /* find the last dot for extension */
   for (i = 0; lfn[i] != 0; i++) {
     if (lfn[i] == '.')
@@ -310,6 +316,53 @@ static long gendirlist(struct sfsdb *root, unsigned char fatflag) {
   if (dp == NULL)
     return (-1);
   fullpathoffset = sprintf(fullpath, "%s/", root->name);
+
+  /* If this is the root directory (or any directory really, DOS usually only
+     sees VOL in root), we can inject a synthetic volume label based on the
+     directory name. We check if the name doesn't end with a slash, we extract
+     the basename. */
+  if (root->name[0] != 0) {
+    char *basename = root->name;
+    char *p;
+    for (p = root->name; *p != 0; p++) {
+      if (*p == '/' || *p == '\\')
+        basename = p + 1;
+    }
+
+    /* Only if we found a valid basename */
+    if (*basename != 0) {
+      newnode = calloc(1, sizeof(struct sdirlist));
+      if (newnode != NULL) {
+        char volname[12];
+        char c;
+        int i;
+        /* format as 11-char volume label, no extension dot */
+        for (i = 0; i < 11; i++)
+          volname[i] = ' ';
+        for (i = 0; i < 11 && basename[i] != 0; i++) {
+          c = basename[i];
+          if (c >= 'a' && c <= 'z')
+            c -= ('a' - 'A');
+          volname[i] = c;
+        }
+        volname[11] = 0;
+
+        memset(&(newnode->fprops), 0, sizeof(struct fileprops));
+        memcpy(newnode->fprops.fcbname, volname, 11);
+        newnode->fprops.fattr = 0x08; /* FAT_VOL */
+        newnode->fprops.ftime = 0;    /* Optional for VOL */
+        newnode->fprops.fsize = 0;
+
+        strcpy(newnode->sfn_name,
+               basename); /* Not strictly used for VOL but good hygiene */
+
+        root->dirlist = newnode;
+        lastnode = newnode;
+        res++;
+      }
+    }
+  }
+
   for (;;) {
     int collision_idx = 0;
     char tempsfn[14];
