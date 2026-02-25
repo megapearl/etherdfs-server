@@ -362,37 +362,8 @@ static long gendirlist(struct sfsdb *root, unsigned char fatflag,
         memset(&(newnode->fprops), 0, sizeof(struct fileprops));
         memcpy(newnode->fprops.fcbname, volname, 11);
         newnode->fprops.fattr = 0x08; /* FAT_VOL */
-        /* Convert custom volume label to pseudo serial number by hashing it */
-        /* DOS often derives the 'Volume Serial Number' for network drives using
-           checking the Date/Time of the Volume Label entry if INT 21h AX=6900h
-           defaults. We pack a djb2 hash of the label into a valid DOS
-           timestamp. */
-        {
-          unsigned long hash = 5381;
-          const char *str = volname;
-          unsigned long h_date, h_time, valid_dos_time;
-          int c;
-
-          while ((c = *str++))
-            hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
-
-          h_date = hash >> 16;
-          h_time = hash & 0xFFFF;
-
-          /* valid ranges for DOS timestamps */
-          valid_dos_time = (((h_date % 120) << 25) |      /* Year 1980-2099 */
-                            (((h_date % 12) + 1) << 21) | /* Month 1-12 */
-                            (((h_date % 31) + 1) << 16) | /* Day 1-31 */
-                            ((h_time % 24) << 11) |       /* Hour 0-23 */
-                            ((h_time % 60) << 5) |        /* Minute 0-59 */
-                            (h_time % 30));               /* Second/2 0-29 */
-
-          /* Some DOS versions fetch the Volume Serial Number from a combination
-             of Date/Time while others use the Date/Time and File Size fields of
-             the Volume Label. We set both to ensure maximum compatibility. */
-          newnode->fprops.ftime = valid_dos_time;
-          newnode->fprops.fsize = hash;
-        }
+        newnode->fprops.ftime = 0;    /* Optional for VOL */
+        newnode->fprops.fsize = 0;
 
         strcpy(newnode->sfn_name,
                basename); /* Not strictly used for VOL but good hygiene */
