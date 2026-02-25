@@ -1,0 +1,23 @@
+--- fs.c
++++ fs.c
+@@ -379,12 +379,17 @@
+           h_date = hash >> 16;
+           h_time = hash & 0xFFFF;
+ 
+-          /* Some DOS versions fetch the Volume Serial Number from a combination of Date/Time 
+-             while others use the Date/Time and File Size fields of the Volume Label. 
+-             We set both to ensure maximum compatibility. */
++          /* valid ranges for DOS timestamps */
++          valid_dos_time = (((h_date % 120) << 25) |      /* Year 1980-2099 */
++                            (((h_date % 12) + 1) << 21) | /* Month 1-12 */
++                            (((h_date % 31) + 1) << 16) | /* Day 1-31 */
++                            ((h_time % 24) << 11) |       /* Hour 0-23 */
++                            ((h_time % 60) << 5) |        /* Minute 0-59 */
++                            (h_time % 30));               /* Second/2 0-29 */
++
+           newnode->fprops.ftime = valid_dos_time;
+           newnode->fprops.fsize = hash;
+         }
+ 
+         strcpy(newnode->sfn_name,
+ 
