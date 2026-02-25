@@ -1,5 +1,5 @@
 /*
- * Part of ethersrv
+ * Part of ethersrv-linux
  */
 
 /* set to 1 to enable debug */

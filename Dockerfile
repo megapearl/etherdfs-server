@@ -7,7 +7,7 @@ COPY . /opt/etherdfs
 WORKDIR /opt/etherdfs
 
 # Build and install
-RUN make && cp ethersrv /usr/local/bin/ && chmod +x /usr/local/bin/ethersrv
+RUN make && cp ethersrv-linux /usr/local/bin/ethersrv && chmod +x /usr/local/bin/ethersrv
 
 # Cleanup
 RUN apk del gcc make musl-dev linux-headers && rm -rf /opt/etherdfs
@@ -16,4 +16,4 @@ RUN mkdir -p /data
 VOLUME /data
 
 # Logging and startup sequence
-CMD ["ethersrv", "-f", "-s", "1500", "vlan2", "/data"]
+CMD ["ethersrv", "-f", "vlan2", "/data"]
