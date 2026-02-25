@@ -60,24 +60,26 @@
 /* Static buffer size, sufficient for max ethernet frame */
 #define BUFF_LEN 2048
 
-/* GLOBAL DEBUG FLAG */
-static int debug_enabled = 0;
+/* GLOBAL DEBUG LEVEL FLAG
+ * 0 = off, 1 = normal debug, 2 = full packet dump */
+static int debug_level = 0;
 
 /* GLOBAL DELAY FLAG */
 static int delay_us = 0;
 
 /* Debug Helper Function */
-static void debug_log(const char *format, ...) {
-  if (debug_enabled) {
+static void debug_log(int level, const char *format, ...) {
+  if (debug_level >= level) {
     va_list args;
+
     va_start(args, format);
     vfprintf(stderr, format, args);
     va_end(args);
   }
 }
 
-/* Macro to replace old DBG calls */
-#define DBG(...) debug_log(__VA_ARGS__)
+/* Macro to replace old DBG calls - defaults to level 1 */
+#define DBG(...) debug_log(1, __VA_ARGS__)
 
 static struct struct_answcache {
   unsigned char frame[1520]; /* entire frame that was sent (first 6 bytes is the
@@ -869,7 +871,7 @@ static void dumpframe(unsigned char *frame, int len) {
   int lines;
   const int LINEWIDTH = 16;
 
-  if (!debug_enabled)
+  if (debug_level < 2)
     return; /* GUARD moved AFTER declarations (ANSI C compliance) */
 
   lines = (len + LINEWIDTH - 1) / LINEWIDTH; /* compute the number of lines */
@@ -943,7 +945,9 @@ static void help(void) {
          "  -s <usec> : add an artificial delay (in microseconds) before "
          "sending packets\n"
          "              (useful for very slow machines like the 8088 XT)\n"
-         "  -v        : output verbose debug information (to stdout)\n\n"
+         "  -v        : output verbose debug information (to stdout)\n"
+         "  -vv       : output extremely verbose debug info including raw "
+         "frame dumps\n\n"
          "http://etherdfs.sourceforge.net\n");
 }
 
@@ -993,7 +997,7 @@ int main(int argc, char **argv) {
       delay_us = atoi(optarg);
       break;
     case 'v':
-      debug_enabled = 1;
+      debug_level++;
       break; /* ENABLE DEBUG */
     case 'h':
       help();
@@ -1028,7 +1032,7 @@ int main(int argc, char **argv) {
     } else {
       drivesfat[i + 2] = 0;
       /* Only warn if verbose */
-      if (debug_enabled) {
+      if (debug_level >= 1) {
         fprintf(stderr,
                 "WARNING: path '%s' not FAT! DOS attributes disabled.\n",
                 root[i + 2]);
@@ -1113,8 +1117,8 @@ int main(int argc, char **argv) {
       len = edf5framelen;
     }
 
-    /* DUMP RECEIVED FRAME IF DEBUG IS ON */
-    if (debug_enabled) {
+    /* DUMP RECEIVED FRAME IF DEBUG IS ON LEVEL 2 */
+    if (debug_level >= 2) {
       DBG("Received frame of %d bytes (cksum = %s)\n", len,
           (cksumflag != 0) ? "ENABLED" : "DISABLED");
       dumpframe(buff, len);
@@ -1163,8 +1167,8 @@ int main(int argc, char **argv) {
         cacheptr->frame[56] &= 127;
       }
 
-      /* DUMP SENT FRAME IF DEBUG IS ON */
-      if (debug_enabled) {
+      /* DUMP SENT FRAME IF DEBUG IS ON LEVEL 2 */
+      if (debug_level >= 2) {
         DBG("Sending back an answer of %d bytes\n", len);
         dumpframe(cacheptr->frame, len);
       }
