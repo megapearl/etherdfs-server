@@ -39,9 +39,24 @@ if [ -n "$VOLUME_LABEL" ]; then
     ARGS="$ARGS -v \"$VOLUME_LABEL\""
 fi
 
+if [ -n "$ALLOWED_MAC" ]; then
+    echo "Applying MAC ACL Whitelist (-m): $ALLOWED_MAC"
+    ARGS="$ARGS -m \"$ALLOWED_MAC\""
+fi
+
+if [ "$ETHERDFS_LOWERCASE" = "1" ] || [ "$ETHERDFS_LOWERCASE" = "true" ]; then
+    echo "Enabling Auto-Lowercasing (-l)"
+    ARGS="$ARGS -l"
+fi
+
 if [ "$ETHERDFS_DEBUG" = "1" ] || [ "$ETHERDFS_DEBUG" = "true" ]; then
     echo "Enabling runtime debug logging (-d)"
     ARGS="$ARGS -d"
+fi
+
+if [ "$ETHERDFS_READONLY" = "1" ] || [ "$ETHERDFS_READONLY" = "true" ]; then
+    echo "Enabling Museum Mode: Read-Only (-r)"
+    ARGS="$ARGS -r"
 fi
 
 if [ -n "$ETHERDFS_DELAY" ] && [ "$ETHERDFS_DELAY" -gt 0 ] 2>/dev/null; then

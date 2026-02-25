@@ -104,4 +104,6 @@ long getfopsize(unsigned short fss);
  * real LFNs */
 void resolve_path(char *resolved_path, const char *root, const char *dos_path);
 
+extern int lowercase_mode;
+
 #endif

@@ -105,6 +105,10 @@ char custom_vol_label[12] = {0}; /* holds an optional custom volume label */
 
 /* runtime debug and delay parameters */
 int debug_mode = 0;
+int readonly_mode = 0;
+int lowercase_mode = 0;
+unsigned char allowed_mac[6];
+int allowed_mac_set = 0;
 unsigned int target_delay_ms = 0;
 
 void sigcatcher(int sig) {
@@ -306,19 +310,23 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
       reslen += readlen;
     }
   } else if ((query == AL_WRITEFIL) && (reqbufflen >= 6)) { /* AL=09h */
-    uint16_t fileid;
-    uint32_t offset;
-    long writelen;
-    offset = le32toh(((uint32_t *)reqbuff)[0]);
-    fileid = le16toh(wreqbuff[2]);
-    DBG("Writing %u bytes into file #%u, starting offset %u\n", reqbufflen - 6,
-        fileid, offset);
-    writelen = writefile(reqbuff + 6, fileid, offset, reqbufflen - 6);
-    if (writelen < 0) {
-      *ax = 5; /* "access denied" */
+    if (readonly_mode) {
+      *ax = 5; /* Access Denied */
     } else {
-      wansw[0] = htole16(writelen);
-      reslen += 2;
+      uint16_t fileid;
+      uint32_t offset;
+      long writelen;
+      offset = le32toh(((uint32_t *)reqbuff)[0]);
+      fileid = le16toh(wreqbuff[2]);
+      DBG("Writing %u bytes into file #%u, starting offset %u\n",
+          reqbufflen - 6, fileid, offset);
+      writelen = writefile(reqbuff + 6, fileid, offset, reqbufflen - 6);
+      if (writelen < 0) {
+        *ax = 5; /* "access denied" */
+      } else {
+        wansw[0] = htole16(writelen);
+        reslen += 2;
+      }
     }
   } else if ((query == AL_LOCKFIL) ||
              (query == AL_UNLOCKFIL)) { /* 0x0A / 0x0B */
@@ -431,34 +439,38 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
       reslen = 24;
     }
   } else if ((query == AL_MKDIR) || (query == AL_RMDIR)) { /* MKDIR or RMDIR */
-    char directory[512];
-    char dos_dir[256];
-
-    memcpy(dos_dir, (char *)reqbuff, reqbufflen);
-    dos_dir[reqbufflen] = 0;
-    lostring(dos_dir, -1);
-    charreplace(dos_dir, '\\', '/');
-
-    if (query == AL_RMDIR) {
-      resolve_path(directory, root, dos_dir);
+    if (readonly_mode) {
+      *ax = 5;
     } else {
-      /* MKDIR: resolve parent, append new name.
-         A simple resolve_path might just return the SFN if the dir doesn't
-         exist, which is actually correct since MKDIR should create what DOS
-         asked for */
-      resolve_path(directory, root, dos_dir);
-    }
-    if (query == AL_MKDIR) {
-      DBG("MKDIR '%s'\n", directory);
-      if (makedir(directory) != 0) {
-        *ax = 29;
-        fprintf(stderr, "MKDIR Error: %s\n", strerror(errno));
+      char directory[512];
+      char dos_dir[256];
+
+      memcpy(dos_dir, (char *)reqbuff, reqbufflen);
+      dos_dir[reqbufflen] = 0;
+      lostring(dos_dir, -1);
+      charreplace(dos_dir, '\\', '/');
+
+      if (query == AL_RMDIR) {
+        resolve_path(directory, root, dos_dir);
+      } else {
+        /* MKDIR: resolve parent, append new name.
+           A simple resolve_path might just return the SFN if the dir doesn't
+           exist, which is actually correct since MKDIR should create what DOS
+           asked for */
+        resolve_path(directory, root, dos_dir);
       }
-    } else {
-      DBG("RMDIR '%s'\n", directory);
-      if (remdir(directory) != 0) {
-        *ax = 29;
-        fprintf(stderr, "RMDIR Error: %s\n", strerror(errno));
+      if (query == AL_MKDIR) {
+        DBG("MKDIR '%s'\n", directory);
+        if (makedir(directory) != 0) {
+          *ax = 29;
+          fprintf(stderr, "MKDIR Error: %s\n", strerror(errno));
+        }
+      } else {
+        DBG("RMDIR '%s'\n", directory);
+        if (remdir(directory) != 0) {
+          *ax = 29;
+          fprintf(stderr, "RMDIR Error: %s\n", strerror(errno));
+        }
       }
     }
   } else if (query == AL_CHDIR) { /* check if dir exist, return ax=0 if so, ax=3
@@ -485,23 +497,27 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
     *ax = 0;
   } else if ((query == AL_SETATTR) &&
              (reqbufflen > 1)) { /* AL_SETATTR (0x0E) */
-    char fname[512];
-    char dos_fname[256];
-    unsigned char fattr;
-    fattr = reqbuff[0];
+    if (readonly_mode) {
+      *ax = 5;
+    } else {
+      char fname[512];
+      char dos_fname[256];
+      unsigned char fattr;
+      fattr = reqbuff[0];
 
-    /* get full file path */
-    memcpy(dos_fname, (char *)reqbuff + 1, reqbufflen - 1);
-    dos_fname[reqbufflen - 1] = 0;
-    lostring(dos_fname, -1);
-    charreplace(dos_fname, '\\', '/');
+      /* get full file path */
+      memcpy(dos_fname, (char *)reqbuff + 1, reqbufflen - 1);
+      dos_fname[reqbufflen - 1] = 0;
+      lostring(dos_fname, -1);
+      charreplace(dos_fname, '\\', '/');
 
-    resolve_path(fname, root, dos_fname);
-    DBG("SETATTR [file: '%s', attr: 0x%02X]\n", fname, fattr);
-    /* set attr, but only if drive is FAT */
-    if (drivesfat[reqdrv] != 0) {
-      if (setitemattr(fname, fattr) != 0)
-        *ax = 2;
+      resolve_path(fname, root, dos_fname);
+      DBG("SETATTR [file: '%s', attr: 0x%02X]\n", fname, fattr);
+      /* set attr, but only if drive is FAT */
+      if (drivesfat[reqdrv] != 0) {
+        if (setitemattr(fname, fattr) != 0)
+          *ax = 2;
+      }
     }
   } else if ((query == AL_GETATTR) &&
              (reqbufflen > 0)) { /* AL_GETATTR (0x0F) */
@@ -534,52 +550,60 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
       answ[reslen++] = fprops.fattr;
     }
   } else if ((query == AL_RENAME) && (reqbufflen > 2)) { /* AL_RENAME (0x11) */
-    /* query is LSSS...DDD... */
-    char fn1[1024], fn2[1024];
-    int fn1len, fn2len, offset;
-    offset = sprintf(fn1, "%s/", root);
-    sprintf(fn2, "%s/", root);
-    fn1len = reqbuff[0];
-    fn2len = reqbufflen - (1 + fn1len);
-    if (reqbufflen > fn1len) {
-      memcpy(fn1 + offset, reqbuff + 1, fn1len);
-      fn1[fn1len + offset] = 0;
-      lostring(fn1 + offset, -1);
-      charreplace(fn1, '\\', '/');
-      memcpy(fn2 + offset, reqbuff + 1 + fn1len, fn2len);
-      fn2[fn2len + offset] = 0;
-      lostring(fn2 + offset, -1);
-      charreplace(fn2, '\\', '/');
-      DBG("RENAME src='%s' dst='%s'\n", fn1, fn2);
-      /* if fn2 destination exists, abort with errcode=5 (as does MS-DOS 5) */
-      if (getitemattr(fn2, NULL, 0) != 0xff) {
-        DBG("ERROR: '%s' exists already\n", fn2);
-        *ax = 5;
-      } else {
-        DBG("'%s' doesn't exist -> proceed with renaming\n", fn2);
-        if (renfile(fn1, fn2) != 0)
-          *ax = 5;
-      }
+    if (readonly_mode) {
+      *ax = 5;
     } else {
-      *ax = 2;
+      /* query is LSSS...DDD... */
+      char fn1[1024], fn2[1024];
+      int fn1len, fn2len, offset;
+      offset = sprintf(fn1, "%s/", root);
+      sprintf(fn2, "%s/", root);
+      fn1len = reqbuff[0];
+      fn2len = reqbufflen - (1 + fn1len);
+      if (reqbufflen > fn1len) {
+        memcpy(fn1 + offset, reqbuff + 1, fn1len);
+        fn1[fn1len + offset] = 0;
+        lostring(fn1 + offset, -1);
+        charreplace(fn1, '\\', '/');
+        memcpy(fn2 + offset, reqbuff + 1 + fn1len, fn2len);
+        fn2[fn2len + offset] = 0;
+        lostring(fn2 + offset, -1);
+        charreplace(fn2, '\\', '/');
+        DBG("RENAME src='%s' dst='%s'\n", fn1, fn2);
+        /* if fn2 destination exists, abort with errcode=5 (as does MS-DOS 5) */
+        if (getitemattr(fn2, NULL, 0) != 0xff) {
+          DBG("ERROR: '%s' exists already\n", fn2);
+          *ax = 5;
+        } else {
+          DBG("'%s' doesn't exist -> proceed with renaming\n", fn2);
+          if (renfile(fn1, fn2) != 0)
+            *ax = 5;
+        }
+      } else {
+        *ax = 2;
+      }
     }
   } else if (query == AL_DELETE) {
-    char fullpathname[512];
-    char dos_fname[256];
+    if (readonly_mode) {
+      *ax = 5;
+    } else {
+      char fullpathname[512];
+      char dos_fname[256];
 
-    /* compute full path/file first */
-    memcpy(dos_fname, reqbuff, reqbufflen);
-    dos_fname[reqbufflen] = 0;
-    lostring(dos_fname, -1);
-    charreplace(dos_fname, '\\', '/');
+      /* compute full path/file first */
+      memcpy(dos_fname, reqbuff, reqbufflen);
+      dos_fname[reqbufflen] = 0;
+      lostring(dos_fname, -1);
+      charreplace(dos_fname, '\\', '/');
 
-    resolve_path(fullpathname, root, dos_fname);
-    DBG("DELETE '%s'\n", fullpathname);
-    /* is it read-only? */
-    if (getitemattr(fullpathname, NULL, drivesfat[reqdrv]) & 1) {
-      *ax = 5; /* "access denied" */
-    } else if (delfiles(fullpathname) < 0) {
-      *ax = 2;
+      resolve_path(fullpathname, root, dos_fname);
+      DBG("DELETE '%s'\n", fullpathname);
+      /* is it read-only? */
+      if (getitemattr(fullpathname, NULL, drivesfat[reqdrv]) & 1) {
+        *ax = 5; /* "access denied" */
+      } else if (delfiles(fullpathname) < 0) {
+        *ax = 2;
+      }
     }
   } else if ((query == AL_OPEN) || (query == AL_CREATE) ||
              (query ==
@@ -631,8 +655,12 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
       if (query == AL_CREATE) {
         DBG("CREATEFIL / stackattr (attribs)=%04Xh / fn='%s'\n", stackattr,
             fullpathname);
-        fileres = createfile(&fprops, directory, fname, stackattr & 0xff,
-                             drivesfat[reqdrv]);
+        if (readonly_mode) {
+          fileres = -1; /* simulate failure */
+        } else {
+          fileres = createfile(&fprops, directory, fname, stackattr & 0xff,
+                               drivesfat[reqdrv]);
+        }
         resopenmode = 2; /* read/write */
       } else if (query == AL_SPOPNFIL) {
         /* actioncode contains instructions about how to behave...
@@ -676,11 +704,15 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
             spopres = 1; /* spopres == 1 means 'file opened' */
           } else if ((actioncode & 0x0f) == 2) { /* truncate */
             DBG("truncate file\n");
-            fileres = createfile(&fprops, directory, fname, stackattr & 0xff,
-                                 drivesfat[reqdrv]);
-            if (fileres == 0)
-              spopres = 3; /* spopres == 3 means 'file truncated' */
-          } else {         /* fail */
+            if (readonly_mode) {
+              fileres = 1;
+            } else {
+              fileres = createfile(&fprops, directory, fname, stackattr & 0xff,
+                                   drivesfat[reqdrv]);
+              if (fileres == 0)
+                spopres = 3; /* spopres == 3 means 'file truncated' */
+            }
+          } else { /* fail */
             DBG("fail\n");
             fileres = 1;
           }
@@ -892,20 +924,24 @@ static unsigned short bsdsum(unsigned char *ptr, unsigned short l) {
 }
 
 static void help(void) {
-  printf("ethersrv-linux version " PVER
-         " | Copyright (C) 2017, 2018 Mateusz Viste\n"
-         "http://etherdfs.sourceforge.net\n"
-         "\n"
-         "usage: ethersrv-linux [options] interface rootpath1 [rootpath2] ... "
-         "[rootpathN]\n"
-         "\n"
-         "Options:\n"
-         "  -d        Enable runtime debug logging\n"
-         "  -f        Keep in foreground (do not daemonize)\n"
-         "  -s <ms>   Artificial delay in milliseconds to slow down packet "
-         "processing\n"
-         "  -v <label> Specify a custom volume label (max 11 chars)\n"
-         "  -h        Display this information\n");
+  printf(
+      "ethersrv-linux version " PVER
+      " | Copyright (C) 2017, 2018 Mateusz Viste\n"
+      "http://etherdfs.sourceforge.net\n"
+      "\n"
+      "usage: ethersrv-linux [options] interface rootpath1 [rootpath2] ... "
+      "[rootpathN]\n"
+      "\n"
+      "Options:\n"
+      "  -d        Enable runtime debug logging\n"
+      "  -f        Keep in foreground (do not daemonize)\n"
+      "  -l        Auto-lowercase new DOS files\n"
+      "  -m <MAC>  Whitelist a specific MAC address (e.g. 00:11:22:33:44:55)\n"
+      "  -r        Enable Read-Only museum mode (reject modifications)\n"
+      "  -s <ms>   Artificial delay in milliseconds to slow down packet "
+      "processing\n"
+      "  -v <label> Specify a custom volume label (max 11 chars)\n"
+      "  -h        Display this information\n");
 }
 
 /* daemonize the process, return 0 on success, non-zero otherwise */
@@ -947,13 +983,33 @@ int main(int argc, char **argv) {
   int daemon = 1; /* daemonize self by default */
 #define lockfile "/var/run/ethersrv.lock"
 
-  while ((opt = getopt(argc, argv, "dfhs:v:")) != -1) {
+  while ((opt = getopt(argc, argv, "dflhm:rs:v:")) != -1) {
     switch (opt) {
     case 'd': /* -d: enable debug mode */
       debug_mode = 1;
       break;
     case 'f': /* -f: no daemon */
       daemon = 0;
+      break;
+    case 'l': /* -l: auto-lowercase mode */
+      lowercase_mode = 1;
+      break;
+    case 'm': { /* -m: allow specific MAC */
+      unsigned int mac_tmp[6];
+      if (sscanf(optarg, "%x:%x:%x:%x:%x:%x", &mac_tmp[0], &mac_tmp[1],
+                 &mac_tmp[2], &mac_tmp[3], &mac_tmp[4], &mac_tmp[5]) == 6) {
+        int mi;
+        for (mi = 0; mi < 6; mi++)
+          allowed_mac[mi] = (unsigned char)(mac_tmp[mi] & 0xFF);
+        allowed_mac_set = 1;
+      } else {
+        fprintf(stderr, "ERROR: Invalid MAC format. Use XX:XX:XX:XX:XX:XX\n");
+        return (1);
+      }
+      break;
+    }
+    case 'r': /* -r: read only mode */
+      readonly_mode = 1;
       break;
     case 's': /* -s: delay in milliseconds */
       target_delay_ms = strtoul(optarg, NULL, 10);
@@ -1049,6 +1105,12 @@ int main(int argc, char **argv) {
     len = recv(sock, buff, sizeof(buff), MSG_DONTWAIT);
     if (len < 60)
       continue; /* restart if less than 60 bytes or negative */
+
+    /* enforce MAC ACL if set */
+    if (allowed_mac_set && memcmp(allowed_mac, buff + 6, 6) != 0) {
+      continue; /* ignore frame from unauthorized MAC */
+    }
+
     /* validate this is for me (or broadcast) */
     if ((cmpdata(mymac, buff, 6) != 0) &&
         (cmpdata((unsigned char *)"\xff\xff\xff\xff\xff\xff", buff, 6) != 0))

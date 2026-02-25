@@ -125,8 +125,8 @@ void lfn2sfn(char *sfn, const char *lfn, int collision_idx) {
   /* copy valid chars to basen (max 8) */
   for (i = 0; lfn[i] != 0 && i != ext_idx && j < 8; i++) {
     char c = lfn[i];
-    if (c == ' ' || c == '+' || c == ',' || c == ';' || c == '=' || c == '[' ||
-        c == ']')
+    if (c == ' ' || c == '.' || c == '+' || c == ',' || c == ';' || c == '=' ||
+        c == '[' || c == ']')
       continue; /* DOS invalid chars */
     basen[j++] = upchar(c);
   }
@@ -136,8 +136,8 @@ void lfn2sfn(char *sfn, const char *lfn, int collision_idx) {
     j = 0;
     for (i = ext_idx + 1; lfn[i] != 0 && j < 3; i++) {
       char c = lfn[i];
-      if (c == ' ' || c == '+' || c == ',' || c == ';' || c == '=' ||
-          c == '[' || c == ']')
+      if (c == ' ' || c == '.' || c == '+' || c == ',' || c == ';' ||
+          c == '=' || c == '[' || c == ']')
         continue;
       extn[j++] = upchar(c);
     }
@@ -531,11 +531,23 @@ unsigned long long diskinfo(char *path, unsigned long long *dfree) {
 int makedir(char *d) { return (mkdir(d, 0)); }
 
 /* try to remove directory, return 0 on success, non-zero otherwise */
-int remdir(char *d) { return (rmdir(d)); }
+int remdir(char *d) {
+  struct stat st;
+  if (lstat(d, &st) == 0 && S_ISLNK(st.st_mode)) {
+    return unlink(d);
+  }
+  return (rmdir(d));
+}
 
 /* change to directory d, return 0 if worked, non-zero otherwise (used
  * essentially to check whether the directory exists or not) */
 int changedir(char *d) { return (chdir(d)); }
+
+#define READAHEAD_SIZE 65536
+static unsigned char readahead_buff[READAHEAD_SIZE];
+static unsigned short readahead_fss = 0xffff;
+static unsigned long readahead_offset = 0;
+static long readahead_len = 0;
 
 /* reads len bytes from file starting at sector fss, from offset, writes to
  * buff. returns amount of bytes read or a negative value on error. */
@@ -547,6 +559,15 @@ long readfile(unsigned char *buff, unsigned short fss, unsigned long offset,
   fname = fsdb[fss].name;
   if (fname == NULL)
     return (-1);
+
+  /* check read-ahead cache hit */
+  if (fss == readahead_fss && offset >= readahead_offset &&
+      offset + len <= readahead_offset + readahead_len) {
+    memcpy(buff, readahead_buff + (offset - readahead_offset), len);
+    return len;
+  }
+
+  /* cache miss, fetch 64KB */
   fd = fopen(fname, "rb");
   if (fd == NULL)
     return (-1);
@@ -554,8 +575,21 @@ long readfile(unsigned char *buff, unsigned short fss, unsigned long offset,
     fclose(fd);
     return (-1);
   }
-  res = fread(buff, 1, len, fd);
+
+  readahead_fss = fss;
+  readahead_offset = offset;
+  readahead_len = fread(readahead_buff, 1, READAHEAD_SIZE, fd);
   fclose(fd);
+
+  res = (readahead_len < len) ? readahead_len : len;
+
+  if (res > 0) {
+    memcpy(buff, readahead_buff, res);
+  } else {
+    readahead_len = 0; /* invalidate cache on read error/EOF */
+    readahead_fss = 0xffff;
+  }
+
   return (res);
 }
 
@@ -742,7 +776,19 @@ static void resolve_sfn_in_dir(char *actual_name, const char *dir_path,
   }
 
   /* Not found, just return what was asked (useful for AL_CREATE) */
-  strcpy(actual_name, target_sfn);
+  if (lowercase_mode) {
+    int char_idx = 0;
+    while (target_sfn[char_idx]) {
+      char c = target_sfn[char_idx];
+      if (c >= 'A' && c <= 'Z')
+        c += ('a' - 'A');
+      actual_name[char_idx] = c;
+      char_idx++;
+    }
+    actual_name[char_idx] = 0;
+  } else {
+    strcpy(actual_name, target_sfn);
+  }
 }
 
 /* resolve_path intercepts paths coming from DOS and translates SFNs back to
