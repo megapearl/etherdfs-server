@@ -304,7 +304,8 @@ int setitemattr(char *i, unsigned char fattr) {
 
 /* generates a directory listing for *root and returns the number of file
  * system entries, or a negative value on error */
-static long gendirlist(struct sfsdb *root, unsigned char fatflag) {
+static long gendirlist(struct sfsdb *root, unsigned char fatflag,
+                       const char *vollabel) {
   char fullpath[1024];
   int fullpathoffset;
   struct dirent *diridx;
@@ -321,7 +322,7 @@ static long gendirlist(struct sfsdb *root, unsigned char fatflag) {
      sees VOL in root), we can inject a synthetic volume label based on the
      directory name. We check if the name doesn't end with a slash, we extract
      the basename. */
-  if (root->name[0] != 0) {
+  if (root->name[0] != 0 || (vollabel != NULL && vollabel[0] != 0)) {
     char *basename = root->name;
     char *p;
     for (p = root->name; *p != 0; p++) {
@@ -329,8 +330,8 @@ static long gendirlist(struct sfsdb *root, unsigned char fatflag) {
         basename = p + 1;
     }
 
-    /* Only if we found a valid basename */
-    if (*basename != 0) {
+    /* Only if we found a valid basename or have a custom label */
+    if (*basename != 0 || (vollabel != NULL && vollabel[0] != 0)) {
       newnode = calloc(1, sizeof(struct sdirlist));
       if (newnode != NULL) {
         char volname[12];
@@ -339,18 +340,55 @@ static long gendirlist(struct sfsdb *root, unsigned char fatflag) {
         /* format as 11-char volume label, no extension dot */
         for (i = 0; i < 11; i++)
           volname[i] = ' ';
-        for (i = 0; i < 11 && basename[i] != 0; i++) {
-          c = basename[i];
-          if (c >= 'a' && c <= 'z')
-            c -= ('a' - 'A');
-          volname[i] = c;
+
+        /* Use custom volume label if provided, else uppercase basename */
+        if (vollabel != NULL && vollabel[0] != 0) {
+          for (i = 0; i < 11 && vollabel[i] != 0; i++) {
+            c = vollabel[i];
+            if (c >= 'a' && c <= 'z')
+              c -= ('a' - 'A');
+            volname[i] = c;
+          }
+        } else {
+          for (i = 0; i < 11 && basename[i] != 0; i++) {
+            c = basename[i];
+            if (c >= 'a' && c <= 'z')
+              c -= ('a' - 'A');
+            volname[i] = c;
+          }
         }
         volname[11] = 0;
 
         memset(&(newnode->fprops), 0, sizeof(struct fileprops));
         memcpy(newnode->fprops.fcbname, volname, 11);
         newnode->fprops.fattr = 0x08; /* FAT_VOL */
-        newnode->fprops.ftime = 0;    /* Optional for VOL */
+        /* Convert custom volume label to pseudo serial number by hashing it */
+        /* DOS often derives the 'Volume Serial Number' for network drives using
+           checking the Date/Time of the Volume Label entry if INT 21h AX=6900h
+           defaults. We pack a djb2 hash of the label into a valid DOS
+           timestamp. */
+        {
+          unsigned long hash = 5381;
+          const char *str = volname;
+          unsigned long h_date, h_time, valid_dos_time;
+          int c;
+
+          while ((c = *str++))
+            hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
+
+          h_date = hash >> 16;
+          h_time = hash & 0xFFFF;
+
+          /* valid ranges for DOS timestamps */
+          valid_dos_time = (((h_date % 120) << 25) |      /* Year 1980-2099 */
+                            (((h_date % 12) + 1) << 21) | /* Month 1-12 */
+                            (((h_date % 31) + 1) << 16) | /* Day 1-31 */
+                            ((h_time % 24) << 11) |       /* Hour 0-23 */
+                            ((h_time % 60) << 5) |        /* Minute 0-59 */
+                            (h_time % 30));               /* Second/2 0-29 */
+
+          newnode->fprops.ftime = valid_dos_time;
+        }
         newnode->fprops.fsize = 0;
 
         strcpy(newnode->sfn_name,
@@ -419,13 +457,14 @@ static long gendirlist(struct sfsdb *root, unsigned char fatflag) {
  * success, non-zero otherwise. *nth is updated with the nth id of the file that
  * matched */
 int findfile(struct fileprops *f, unsigned short dss, char *fcbtmpl,
-             unsigned char attr, unsigned short *nth, int flags) {
+             unsigned char attr, unsigned short *nth, int flags,
+             const char *vollabel) {
   int n = 0;
   struct sdirlist *dirlist;
   /* recompute the dir listing if operation is FFirst (nth == 0) or if no
    * cache found */
   if ((*nth == 0) || (fsdb[dss].dirlist == NULL)) {
-    long count = gendirlist(&(fsdb[dss]), flags & FFILE_ISFAT);
+    long count = gendirlist(&(fsdb[dss]), flags & FFILE_ISFAT, vollabel);
     if (count < 0) {
       fprintf(stderr, "Error: failed to scan dir '%s'\n", fsdb[dss].name);
       return (-1);

@@ -101,6 +101,7 @@ static unsigned char drivesfat[26]; /* 0 if not, non-zero otherwise */
 
 /* the flag is set when ethersrv is expected to terminate */
 static sig_atomic_t volatile terminationflag = 0;
+char custom_vol_label[12] = {0}; /* holds an optional custom volume label */
 
 void sigcatcher(int sig) {
   switch (sig) {
@@ -360,8 +361,8 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
     if (drivesfat[reqdrv] != 0)
       flags |= FFILE_ISFAT;
     dirss = getitemss(directory);
-    if ((dirss == 0xffffu) ||
-        (findfile(&fprops, dirss, filemaskfcb, fattr, &fpos, flags) != 0)) {
+    if ((dirss == 0xffffu) || (findfile(&fprops, dirss, filemaskfcb, fattr,
+                                        &fpos, flags, custom_vol_label) != 0)) {
       DBG("No matching file found\n");
       *ax = 0x12; /* 0x12 is "no more files" -- one would assume 0x02 "file not
                      found" would be better, but that's not what MS-DOS 5.x
@@ -405,7 +406,8 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
       flags |= FFILE_ISROOT;
     if (drivesfat[reqdrv] != 0)
       flags |= FFILE_ISFAT;
-    if (findfile(&fprops, dirss, fcbmask, fattr, &fpos, flags)) {
+    if (findfile(&fprops, dirss, fcbmask, fattr, &fpos, flags,
+                 custom_vol_label)) {
       DBG("No more matching files found\n");
       *ax = 0x12; /* "no more files" */
     } else {      /* found a file */
@@ -899,6 +901,7 @@ static void help(void) {
          "\n"
          "Options:\n"
          "  -f        Keep in foreground (do not daemonize)\n"
+         "  -v <label> Specify a custom volume label (max 11 chars)\n"
          "  -h        Display this information\n");
 }
 
@@ -941,10 +944,14 @@ int main(int argc, char **argv) {
   int daemon = 1; /* daemonize self by default */
 #define lockfile "/var/run/ethersrv.lock"
 
-  while ((opt = getopt(argc, argv, "fh")) != -1) {
+  while ((opt = getopt(argc, argv, "fhv:")) != -1) {
     switch (opt) {
     case 'f': /* -f: no daemon */
       daemon = 0;
+      break;
+    case 'v': /* -v: custom volume label */
+      strncpy(custom_vol_label, optarg, 11);
+      custom_vol_label[11] = 0; /* Ensure null termination */
       break;
     case 'h': /* -h: help */
       help();

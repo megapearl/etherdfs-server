@@ -30,5 +30,12 @@ if ! ip link show "$INTERFACE" > /dev/null 2>&1; then
 fi
 
 echo "Starting ethersrv-linux on interface $INTERFACE..."
-# exec replaces the shell process so signals are passed correctly
-exec ethersrv-linux -f "$INTERFACE" /data
+
+# If user provided a VOLUME_LABEL environment variable, pass it as -v
+if [ -n "$VOLUME_LABEL" ]; then
+    echo "Using custom volume label: $VOLUME_LABEL"
+    # exec replaces the shell process so signals are passed correctly
+    exec ethersrv-linux -f "$INTERFACE" -v "$VOLUME_LABEL" /data
+else
+    exec ethersrv-linux -f "$INTERFACE" /data
+fi
