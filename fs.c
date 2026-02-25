@@ -491,14 +491,16 @@ int findfile(struct fileprops *f, unsigned short dss, char *fcbtmpl,
     /* if no match, continue */
     if (matchfile2mask(fcbtmpl, dirlist->fprops.fcbname) != 0)
       continue;
-    /* do attributes match? (return only items with AT MOST the specified
-       combination of hidden, system, and directory attributes if no VOL bit
-       set, otherwise look for VOL only. DOS attribs: 1=RO 2=HID 4=SYS 8=VOL
-       16=DIR 32=ARCH 64=DEV */
+    /* do attributes match?
+       DOS attribs: 1=RO 2=HID 4=SYS 8=VOL 16=DIR 32=ARCH 64=DEV */
     if (attr == 0x08) { /* I want VOL */
       if ((dirlist->fprops.fattr & 0x08) == 0)
         continue;
     } else { /* else return any file with at most the specified attributes */
+      /* If the item is a VOL label, do NOT return it unless explicitly
+       * requested above */
+      if ((dirlist->fprops.fattr & 0x08) != 0)
+        continue;
       if ((attr | (dirlist->fprops.fattr & 0x16)) != attr)
         continue;
     }
