@@ -35,7 +35,7 @@ echo "Starting ethersrv-linux on interface $INTERFACE..."
 if [ -n "$VOLUME_LABEL" ]; then
     echo "Using custom volume label: $VOLUME_LABEL"
     # exec replaces the shell process so signals are passed correctly
-    exec ethersrv-linux -f "$INTERFACE" -v "$VOLUME_LABEL" /data
+    exec ethersrv-linux -f -v "$VOLUME_LABEL" "$INTERFACE" /data
 else
     exec ethersrv-linux -f "$INTERFACE" /data
 fi
