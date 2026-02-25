@@ -31,11 +31,23 @@ fi
 
 echo "Starting ethersrv-linux on interface $INTERFACE..."
 
-# If user provided a VOLUME_LABEL environment variable, pass it as -v
+# Build up the arguments array dynamically
+ARGS="-f"
+
 if [ -n "$VOLUME_LABEL" ]; then
     echo "Using custom volume label: $VOLUME_LABEL"
-    # exec replaces the shell process so signals are passed correctly
-    exec ethersrv-linux -f -v "$VOLUME_LABEL" "$INTERFACE" /data
-else
-    exec ethersrv-linux -f "$INTERFACE" /data
+    ARGS="$ARGS -v \"$VOLUME_LABEL\""
 fi
+
+if [ "$ETHERDFS_DEBUG" = "1" ] || [ "$ETHERDFS_DEBUG" = "true" ]; then
+    echo "Enabling runtime debug logging (-d)"
+    ARGS="$ARGS -d"
+fi
+
+if [ -n "$ETHERDFS_DELAY" ] && [ "$ETHERDFS_DELAY" -gt 0 ] 2>/dev/null; then
+    echo "Applying artificial network delay of ${ETHERDFS_DELAY}ms (-s)"
+    ARGS="$ARGS -s $ETHERDFS_DELAY"
+fi
+
+# The eval is necessary because ARGS contains quotes around the volume label
+eval "exec ethersrv-linux $ARGS \"$INTERFACE\" /data"

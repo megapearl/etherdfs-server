@@ -103,6 +103,10 @@ static unsigned char drivesfat[26]; /* 0 if not, non-zero otherwise */
 static sig_atomic_t volatile terminationflag = 0;
 char custom_vol_label[12] = {0}; /* holds an optional custom volume label */
 
+/* runtime debug and delay parameters */
+int debug_mode = 0;
+unsigned int target_delay_ms = 0;
+
 void sigcatcher(int sig) {
   switch (sig) {
   case SIGTERM:
@@ -117,13 +121,11 @@ void sigcatcher(int sig) {
 
 /* returns a printable version of a FCB block (ie. with added null terminator),
  * this is used only by debug routines */
-#if DEBUG > 0
 static char *pfcb(char *s) {
   static char r[12] = "FILENAMEEXT";
   memcpy(r, s, 11);
   return (r);
 }
-#endif
 
 /* turns a character c into its low-case variant */
 static char lochar(char c) {
@@ -827,7 +829,6 @@ static int raw_sock(const int protocol, const char *const interface,
 }
 
 /* used for debug output of frames on screen */
-#if DEBUG > 0
 static void dumpframe(unsigned char *frame, int len) {
   int i, b;
   int lines;
@@ -866,7 +867,6 @@ static void dumpframe(unsigned char *frame, int len) {
     printf("\n");
   }
 }
-#endif
 
 /* compare two chunks of data, returns 0 if data is the same, non-zero otherwise
  */
@@ -900,7 +900,10 @@ static void help(void) {
          "[rootpathN]\n"
          "\n"
          "Options:\n"
+         "  -d        Enable runtime debug logging\n"
          "  -f        Keep in foreground (do not daemonize)\n"
+         "  -s <ms>   Artificial delay in milliseconds to slow down packet "
+         "processing\n"
          "  -v <label> Specify a custom volume label (max 11 chars)\n"
          "  -h        Display this information\n");
 }
@@ -944,10 +947,16 @@ int main(int argc, char **argv) {
   int daemon = 1; /* daemonize self by default */
 #define lockfile "/var/run/ethersrv.lock"
 
-  while ((opt = getopt(argc, argv, "fhv:")) != -1) {
+  while ((opt = getopt(argc, argv, "dfhs:v:")) != -1) {
     switch (opt) {
+    case 'd': /* -d: enable debug mode */
+      debug_mode = 1;
+      break;
     case 'f': /* -f: no daemon */
       daemon = 0;
+      break;
+    case 's': /* -s: delay in milliseconds */
+      target_delay_ms = strtoul(optarg, NULL, 10);
       break;
     case 'v': /* -v: custom volume label */
       strncpy(custom_vol_label, optarg, 11);
@@ -1070,21 +1079,19 @@ int main(int argc, char **argv) {
       continue;
     } else { /* edf5framelen seems sane, use it instead of the Ethernet lenght
               */
-#if DEBUG > 0
-      if (len != edf5framelen) {
+      if (debug_mode && len != edf5framelen) {
         DBG("Note: Received frame with padding from %s (edf5len = %u, ethernet "
             "len = %u)\n",
             printmac(buff + 6), edf5framelen, len);
       }
-#endif
       len = edf5framelen;
     }
     /* */
-#if DEBUG > 0
-    DBG("Received frame of %d bytes (cksum = %s)\n", len,
-        (cksumflag != 0) ? "ENABLED" : "DISABLED");
-    dumpframe(buff, len);
-#endif
+    if (debug_mode) {
+      DBG("Received frame of %d bytes (cksum = %s)\n", len,
+          (cksumflag != 0) ? "ENABLED" : "DISABLED");
+      dumpframe(buff, len);
+    }
 #if SIMLOSS > 0
     /* simulated frame LOSS (input) */
     if ((rand() & 31) == 0) {
@@ -1139,10 +1146,10 @@ int main(int argc, char **argv) {
         cacheptr->frame[55] = 0;
         cacheptr->frame[56] &= 127; /* make sure to reset the CKS bit */
       }
-#if DEBUG > 0
-      DBG("Sending back an answer of %d bytes\n", len);
-      dumpframe(cacheptr->frame, len);
-#endif
+      if (debug_mode) {
+        DBG("Sending back an answer of %d bytes\n", len);
+        dumpframe(cacheptr->frame, len);
+      }
       i = send(sock, cacheptr->frame, len, 0);
       if (i < 0) {
         fprintf(stderr, "ERROR: send() returned %d (%s)\n", i, strerror(errno));

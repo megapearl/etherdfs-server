@@ -313,6 +313,7 @@ static long gendirlist(struct sfsdb *root, unsigned char fatflag,
   struct sdirlist *lastnode = NULL, *newnode, *checknode;
   long res = 0;
   freedirlist(root->dirlist);
+  root->dirlist = NULL;
   dp = opendir(root->name);
   if (dp == NULL)
     return (-1);
@@ -365,8 +366,9 @@ static long gendirlist(struct sfsdb *root, unsigned char fatflag,
         newnode->fprops.ftime = 0;    /* Optional for VOL */
         newnode->fprops.fsize = 0;
 
-        strcpy(newnode->sfn_name,
-               basename); /* Not strictly used for VOL but good hygiene */
+        newnode->sfn_name[0] =
+            0; /* Do not assign basename; prevents artificial DOS collisions
+                  with actual subdirectories */
 
         root->dirlist = newnode;
         lastnode = newnode;

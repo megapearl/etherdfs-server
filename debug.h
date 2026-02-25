@@ -8,14 +8,12 @@
 /* set to 1 for frame loss simulation (for tests only!) */
 #define SIMLOSS 0
 
-/* do not modify the magic below */
+/* declare global debug variable */
+extern int debug_mode;
 
-#if DEBUG > 0
-
-#define DBG printf
-
-#else
-
-#define DBG(...)
-
-#endif
+#define DBG(...)                                                               \
+  do {                                                                         \
+    if (debug_mode) {                                                          \
+      printf(__VA_ARGS__);                                                     \
+    }                                                                          \
+  } while (0)
