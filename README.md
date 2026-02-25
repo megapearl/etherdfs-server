@@ -1,18 +1,18 @@
 # EtherDFS Server for Docker
 
-A lightweight, containerized version of the **EtherDFS Server** (`ethersrv`), designed to run on NAS systems like **TrueNAS Scale**.
+A lightweight, containerized version of the **EtherDFS Server** (`ethersrv`), heavily optimized to run on modern NAS systems like **TrueNAS Scale** and other Linux Docker environments.
 
-This repository hosts a **heavily optimized fork** based on [oerg866/ethersrv-866](https://github.com/oerg866/ethersrv-866).
-which is an actively maintained version of the original [EtherDFS by Mateusz Viste](http://etherdfs.sourceforge.net/).
+This repository hosts a fork based on [oerg866/ethersrv-866](https://github.com/oerg866/ethersrv-866), an actively maintained version of the original [EtherDFS by Mateusz Viste](http://etherdfs.sourceforge.net/).
 
-## ⚡ Key Improvements in this Version
-* **Turbo Performance:** Debug logging is disabled by default (compile-time macros removed), resulting in massive speed improvements for directory listing and file transfers.
-* **Runtime Debugging:** Added a `-v` flag to enable verbose logging only when needed, without rebuilding.
-* **Static Compilation:** The binary is statically linked (`-static`), ensuring it runs on any Linux distribution (Alpine, Debian, TrueNAS) without dependency hell.
-* **Standards Compliant:** Codebase cleaned up to strictly follow ISO C90 standards.
+## 🌟 Key Improvements in this Version
+* **TrueNAS/ZFS 8.3 SFN Compatibility:** Added a custom algorithm to generate DOS-compatible 8.3 Short File Names (`~1`) on the fly. This prevents DOS clients from crashing or failing to access files with long names, spaces, or lowercase letters on case-sensitive filesystems like ZFS. 
+* **Adjustable Output Delay:** Added an optional delay parameter (`ETHERDFS_DELAY`) to slow down server packet transmission, preventing buffer overruns on vintage 8086/XT network cards (like the NE2000).
+* **Dynamic Volume Labels:** Serve custom volume labels to your DOS machine (e.g. `RETRO`) via the `VOLUME_LABEL` environment variable.
+* **Runtime Debugging:** Easily inspect DOS file operations and client connections by setting `ETHERDFS_DEBUG=1` without being overwhelmed by raw ethernet frame hexadecimal dumps. 
+* **Standalone Docker Support:** Includes an intelligent `entrypoint.sh` script to wait for physical interfaces to come online before starting, preventing container crash loops. 
 
 ## 📖 What is EtherDFS?
-EtherDFS creates a **Layer 2 (Raw Ethernet)** drive mapping for MS-DOS clients. It allows an old PC (8086 to Pentium) to mount a folder from your modern NAS as a local drive letter (e.g., `E:`), without requiring a TCP/IP stack.
+EtherDFS creates a **Layer 2 (Raw Ethernet)** drive mapping for MS-DOS clients. It allows an old PC (8086 to Pentium) to mount a folder from your modern NAS as a local drive letter (e.g., `E:`), without requiring a heavy TCP/IP stack.
 
 ```mermaid
 graph TD
@@ -20,23 +20,21 @@ graph TD
     B -- "Raw Ethernet Frames" --> C["TrueNAS Interface (eno1/vlan2)"]
     C -- "Host Networking" --> D[Docker Container]
     D -- "Bind Mount" --> E[ZFS Dataset]
-
 ```
 
 ## ⚠️ Critical Networking Requirements
 
-EtherDFS operates on **Layer 2**. It does **not** use IP addresses (no IP, no Subnet, no Gateway).
+EtherDFS operates entirely on **Layer 2**. It does **not** use IP addresses (no IP, no Subnet, no Gateway).
 
-1. **Network Mode: Host**: You **MUST** use `network_mode: host`.
-* Bridge mode or NAT will block the raw Ethernet frames.
-* Port mapping (`-p 80:80`) is not applicable here.
-
+1. **Network Mode: Host**: You **MUST** use `network_mode: host` in Docker.
+   * Bridge mode or NAT will block the raw Ethernet frames.
+   * Port mapping (`-p 80:80`) is not applicable here.
 
 2. **Physical Interface**: You must bind the application to the *actual* network interface of the host that is connected to the DOS machine's switch (e.g., `eno1`, `eth0`, `br0`, `vlan2`).
 
-## 🚀 Usage
+## 🚀 Docker Setup
 
-### Docker Compose / TrueNAS Scale "Custom App"
+### docker-compose.yml 
 
 ```yaml
 services:
@@ -49,54 +47,46 @@ services:
     cap_add:
       - NET_RAW
       - NET_ADMIN
+    environment:
+      # Set to your primary network interface connected to the DOS machine
+      - INTERFACE=vlan2
+      # Provide a custom 11-character DOS volume label (Optional)
+      - VOLUME_LABEL=RETRO
+      # Enable verbose logging of file operations (Optional, 0 or 1)
+      - ETHERDFS_DEBUG=0
+      # Slow down packet transmission for older XT network cards (milliseconds) 
+      - ETHERDFS_DELAY=0
     volumes:
-      # Format: /path/on/host:/path/in/container
+      # Format: /path/on/host:/data
       - /mnt/tank/retro/dos_games:/data
-    # Command Syntax: ethersrv -f <INTERFACE> <PATH_WITHOUT_TRAILING_SLASH>
-    # -f      : Keep in foreground (Required for Docker!)
-    # -v      : Verbose mode (Optional, enables debug logs)
-    # vlan2   : Replace with your interface (check with 'ip addr')
-    # /data   : The internal mount path
-    command: /usr/local/bin/ethersrv -f vlan2 /data
     restart: unless-stopped
-
 ```
 
-### Command Line Arguments
+## ⚙️ Environment Variables
 
-The entrypoint allows you to pass arguments directly to `ethersrv`:
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `INTERFACE` | `vlan2` | The physical network interface name on the docker host (e.g., `eth0`, `vlan2`). The container will wait gracefully if the interface doesn't exist yet. |
+| `VOLUME_LABEL` | `(directory name)`| An optional custom DOS Volume Label (max 11 chars). If omitted, the root directory name is capitalized and used. |
+| `ETHERDFS_DEBUG`| `0` | Set to `1` to enable verbose logging of DOS operations (`AL_OPEN`, `AL_READ`, `AL_FINDNEXT`) to stdout. Excellent for troubleshooting. |
+| `ETHERDFS_DELAY`| `0` | Artificial network transmission delay in milliseconds (e.g. `5` or `10`). Increase this if your DOS PC crashes or halts during large file transfers due to full NIC buffers. |
 
-| Argument | Description |
-| --- | --- |
-| `-f` | **Mandatory.** Runs the server in the foreground. Without this, the container will exit immediately. |
-| `-v` | **Optional.** Enables Verbose/Debug logging to stderr. Use this only for troubleshooting; it slows down performance. |
-| `<interface>` | The network interface name on the host (e.g., `eth0`, `vlan2`). |
-| `<path>` | The directory to serve. **Do not use a trailing slash** (e.g., use `/data`, not `/data/`). |
+*(Note: The container expects the shared directory to be mounted exactly at `/data`).*
 
 ## 🔧 Troubleshooting & Common Issues
 
 ### 1. "Error: failed to scan dir" / Empty Drive on Client
-
 This is almost always a **Permissions** issue on the Host (TrueNAS).
-
 * **Cause:** The container runs as root, but TrueNAS NFSv4 ACLs might still block access.
 * **Fix:** Ensure the underlying dataset is readable.
 ```bash
 # Run on TrueNAS Shell
 chmod -R 755 /mnt/tank/retro
-
 ```
 
-### 2. "Unknown drive" or Connection Drops
-
-* **Cause:** The server cannot read a specific file or folder due to illegal characters or long filenames that confuse the translation layer.
-* **Check:** Look at the logs (`docker logs etherdfs`). If you see `Error: failed to scan dir .../SomeLongPath`, that folder is the culprit.
-* **Fix:** Rename files to be "DOS Friendly" (short names, no spaces, avoid special chars) or enable **Case Insensitivity** on your ZFS dataset.
-
-### 3. Double Slashes in Logs (`/data//games`)
-
-* **Cause:** You added a trailing slash to your command argument (e.g., `/data/`).
-* **Fix:** Change the command to use `/data`.
+### 2. Client crashes or locks up while reading large files
+Older XT machines with ISA network cards (like the NE2000 or RTL8019) can sometimes have their buffers overflowed by the speed of modern Gigabit NAS servers.
+* **Fix:** Set `ETHERDFS_DELAY=5` in your `docker-compose.yml` to slow down the server's response rate slightly. 
 
 ## 💾 Client Setup (MS-DOS)
 
@@ -115,15 +105,16 @@ C:\APPS\NET\3C509.COM 0x60
 REM 2. Load EtherDFS (automatically finds the server)
 REM Syntax: ETHERDFS SRVMAC rdrv-ldrv
 C:\APPS\ETHERDFS\ETHERDFS.EXE :: C-E
-
 ```
 
-If successful, you will see:
-`EtherDFS v0.8.3 installed (local MAC 00:A0:24:99:7E:7A, pktdrvr at INT 60)`
-`E: -> [C:] on 00:50:56:85:89:9D`
+If successful, you will see output similar to:
+```text
+EtherDFS v0.8.3 installed (local MAC 00:A0:24:99:7E:7A, pktdrvr at INT 60)
+E: -> [C:] on 00:50:56:85:89:9D
+```
 
 ## 📜 Credits
 
 * **Original Author:** [Mateusz Viste](https://etherdfs.sourceforge.net/)
 * **Linux/FreeBSD Fork:** [Michael Ortmann](https://github.com/oerg866/ethersrv-866/)
-* **Dockerization:** [Donald Flissinger](https://github.com/megapearl/etherdfs/)
+* **Dockerization & SFN Enhancements:** [Donald Flissinger](https://github.com/megapearl/etherdfs/)
