@@ -1090,7 +1090,6 @@ int main(int argc, char **argv) {
     if (debug_mode) {
       DBG("Received frame of %d bytes (cksum = %s)\n", len,
           (cksumflag != 0) ? "ENABLED" : "DISABLED");
-      dumpframe(buff, len);
     }
 #if SIMLOSS > 0
     /* simulated frame LOSS (input) */
@@ -1148,7 +1147,6 @@ int main(int argc, char **argv) {
       }
       if (debug_mode) {
         DBG("Sending back an answer of %d bytes\n", len);
-        dumpframe(cacheptr->frame, len);
       }
       i = send(sock, cacheptr->frame, len, 0);
       if (i < 0) {
