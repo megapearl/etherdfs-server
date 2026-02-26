@@ -721,11 +721,13 @@ long getfopsize(unsigned short fss) {
  */
 static void resolve_sfn_in_dir(char *actual_name, const char *dir_path,
                                const char *target_sfn) {
-  struct {
+  struct sfn_entry {
     char lfn[256];
     char sfn[14];
-  } local_sfns[1024];
-  DIR *dp = opendir(dir_path);
+  };
+  struct sfn_entry *local_sfns;
+  int capacity = 1024;
+  DIR *dp;
   struct dirent *diridx;
   int collision_idx;
   char tempsfn[14];
@@ -733,15 +735,34 @@ static void resolve_sfn_in_dir(char *actual_name, const char *dir_path,
   int i, j;
   int collision_found;
 
-  if (dp == NULL) {
+  local_sfns = malloc(capacity * sizeof(struct sfn_entry));
+  if (local_sfns == NULL) {
     strcpy(actual_name, target_sfn);
     return;
   }
 
-  while ((diridx = readdir(dp)) != NULL && count < 1024) {
+  dp = opendir(dir_path);
+  if (dp == NULL) {
+    free(local_sfns);
+    strcpy(actual_name, target_sfn);
+    return;
+  }
+
+  while ((diridx = readdir(dp)) != NULL) {
     /* Skip . and .. to save processing */
     if (strcmp(diridx->d_name, ".") == 0 || strcmp(diridx->d_name, "..") == 0)
       continue;
+
+    if (count >= capacity) {
+      capacity *= 2;
+      struct sfn_entry *new_sfns =
+          realloc(local_sfns, capacity * sizeof(struct sfn_entry));
+      if (new_sfns == NULL) {
+        break; /* Out of memory, process what we have so far */
+      }
+      local_sfns = new_sfns;
+    }
+
     strcpy(local_sfns[count].lfn, diridx->d_name);
     count++;
   }
@@ -771,9 +792,12 @@ static void resolve_sfn_in_dir(char *actual_name, const char *dir_path,
      * interchangeably */
     if (strcasecmp(tempsfn, target_sfn) == 0) {
       strcpy(actual_name, local_sfns[i].lfn);
+      free(local_sfns);
       return;
     }
   }
+
+  free(local_sfns);
 
   /* Not found, just return what was asked (useful for AL_CREATE) */
   if (lowercase_mode) {
