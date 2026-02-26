@@ -6,6 +6,7 @@ This repository hosts a fork based on [oerg866/ethersrv-866](https://github.com/
 
 ## 🌟 Key Improvements in this Version
 * **TrueNAS/ZFS 8.3 SFN Compatibility:** Added a custom algorithm to generate DOS-compatible 8.3 Short File Names (`~1`) on the fly. This prevents DOS clients from crashing or failing to access files with long names, spaces, or lowercase letters on case-sensitive filesystems like ZFS. 
+* **Huge Directory Support:** Removed the rigid 1024-file limit for Short File Name caching. The server now dynamically allocates memory to reliably support gigantic DOS collections (like eXoDOS with 3500+ items per directory) without returning "Invalid directory" errors.
 * **Adjustable Output Delay:** Added an optional delay parameter (`ETHERDFS_DELAY`) to slow down server packet transmission, preventing buffer overruns on vintage 8086/XT network cards (like the NE2000).
 * **Dynamic Volume Labels:** Serve custom volume labels to your DOS machine (e.g. `RETRO`) via the `VOLUME_LABEL` environment variable.
 * **Runtime Debugging:** Easily inspect DOS file operations and client connections by setting `ETHERDFS_DEBUG=1` without being overwhelmed by raw ethernet frame hexadecimal dumps. 
