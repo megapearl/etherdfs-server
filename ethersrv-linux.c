@@ -51,7 +51,7 @@
 #include "lock.h"
 
 /* program version */
-#define PVER "v0.3.8-PRO"
+#define PVER "v0.3.9-PRO"
 
 /* protocol version (single byte, must be in sync with etherdfs) */
 #define PROTOVER 2
@@ -1151,7 +1151,8 @@ int main(int argc, char **argv) {
 
   /* main loop */
   while (terminationflag == 0) {
-    struct timeval stimeout = {10, 0}; /* set timeout to 10s */
+    struct timeval stimeout = {
+        1, 0}; /* set timeout to 1s for accurate throughput timer */
     /* prepare the set of descriptors to be monitored later through select() */
     fd_set fdset;
     FD_ZERO(&fdset);
@@ -1177,11 +1178,10 @@ int main(int argc, char **argv) {
     }
 
     len = recv(sock, buff, sizeof(buff), MSG_DONTWAIT);
-    if (len < 60)
-      continue; /* restart if less than 60 bytes or negative */
 
-    /* track new MACs to announce connections */
-    {
+    /* If we received at least an Ethernet MAC header, track MACs for connection
+     * logging */
+    if (len >= 14) {
       static unsigned char known_macs[16][6];
       static int known_macs_cnt = 0;
       int m_idx, found = 0;
@@ -1193,13 +1193,17 @@ int main(int argc, char **argv) {
       }
       if (!found) {
         printf("Client connected from MAC %s\n", printmac(buff + 6));
-        fflush(stdout); /* Ensure it prints immediately even if
-                           daemonized/redirected */
+        fflush(stdout); /* flush immediately to TrueNAS console */
         if (known_macs_cnt < 16) {
-          memcpy(known_macs[known_macs_cnt++], buff + 6, 6);
+          memcpy(known_macs[known_macs_cnt], buff + 6, 6);
+          known_macs_cnt++;
         }
       }
     }
+
+    if (len < 60)
+      continue; /* restart if less than 60 bytes (invalid EtherDFS frame) or
+                   negative */
 
     /* enforce MAC ACL if set */
     if (allowed_mac_set && memcmp(allowed_mac, buff + 6, 6) != 0) {
@@ -1282,7 +1286,7 @@ int main(int argc, char **argv) {
     } else {
       cacheptr->len = 0;
     }
-    /* */
+/* */
 #if SIMLOSS > 0
     /* simulated frame LOSS (output) */
     if ((rand() & 31) == 0) {
