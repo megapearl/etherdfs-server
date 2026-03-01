@@ -43,6 +43,8 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/types.h>
 #include <time.h>   /* time() */
 #include <unistd.h> /* close(), getopt(), optind */
 
@@ -51,7 +53,7 @@
 #include "lock.h"
 
 /* program version */
-#define PVER "v0.3.9-PRO"
+#define PVER "v0.3.10-PRO"
 
 /* protocol version (single byte, must be in sync with etherdfs) */
 #define PROTOVER 2
@@ -1147,7 +1149,10 @@ int main(int argc, char **argv) {
   umask(0);
 
   /* throughput timer */
-  time_t last_stat_time = time(NULL);
+  /* throughput timer using gettimeofday instead of whole seconds */
+  struct timeval stat_tv;
+  gettimeofday(&stat_tv, NULL);
+  double last_stat_time = stat_tv.tv_sec + (stat_tv.tv_usec / 1000000.0);
 
   /* main loop */
   while (terminationflag == 0) {
@@ -1162,8 +1167,12 @@ int main(int argc, char **argv) {
 
     /* Check throughput statistics */
     {
-      time_t current_time = time(NULL);
-      if (current_time != last_stat_time) {
+      struct timeval current_tv;
+      gettimeofday(&current_tv, NULL);
+      double current_time =
+          current_tv.tv_sec + (current_tv.tv_usec / 1000000.0);
+
+      if (current_time - last_stat_time >= 1.0) {
         unsigned long long total_bytes = stat_bytes_read + stat_bytes_written;
         /* Print only if > 50 KB/s combined throughput */
         if (total_bytes > (50ULL * 1024ULL)) {
