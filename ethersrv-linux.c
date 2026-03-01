@@ -53,7 +53,7 @@
 #include "lock.h"
 
 /* program version */
-#define PVER "v0.3.10-PRO"
+#define PVER "v0.3.11-PRO"
 
 /* protocol version (single byte, must be in sync with etherdfs) */
 #define PROTOVER 2
@@ -1174,8 +1174,9 @@ int main(int argc, char **argv) {
 
       if (current_time - last_stat_time >= 1.0) {
         unsigned long long total_bytes = stat_bytes_read + stat_bytes_written;
-        /* Print only if > 50 KB/s combined throughput */
-        if (total_bytes > (50ULL * 1024ULL)) {
+        /* Print only if > 10 KB/s combined throughput to accommodate slower
+         * MS-DOS packet drivers */
+        if (total_bytes > (10ULL * 1024ULL)) {
           printf("[Throughput] Read: %llu KB/s | Write: %llu KB/s\n",
                  stat_bytes_read / 1024ULL, stat_bytes_written / 1024ULL);
           fflush(stdout);
