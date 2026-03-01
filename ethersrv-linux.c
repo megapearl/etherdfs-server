@@ -51,7 +51,7 @@
 #include "lock.h"
 
 /* program version */
-#define PVER "20170415"
+#define PVER "v0.3.8-PRO"
 
 /* protocol version (single byte, must be in sync with etherdfs) */
 #define PROTOVER 2
@@ -1122,12 +1122,17 @@ int main(int argc, char **argv) {
         lockfile);
     return (1);
   }
+  printf("Version: %s\n", PVER);
   printf("Listening on '%s' [%s]\n", intname, printmac(mymac));
   for (i = 2; i < 26; i++) {
     if (root[i] == NULL)
       break;
     printf("Drive %c: mapped to %s\n", 'A' + i, root[i]);
   }
+
+  /* forcefully flush the startup banner to the console so Docker logs it
+   * immediately */
+  fflush(stdout);
 
   if (daemon != 0) {
     if (daemonize() != 0) {
