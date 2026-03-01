@@ -9,11 +9,11 @@
 #define SIMLOSS 0
 
 /* declare global debug variable */
-extern int debug_mode;
+extern int debug_level;
 
 #define DBG(...)                                                               \
   do {                                                                         \
-    if (debug_mode) {                                                          \
+    if (debug_level > 0) {                                                     \
       printf(__VA_ARGS__);                                                     \
     }                                                                          \
   } while (0)

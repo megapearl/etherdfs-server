@@ -105,7 +105,7 @@ static sig_atomic_t volatile terminationflag = 0;
 char custom_vol_label[12] = {0}; /* holds an optional custom volume label */
 
 /* runtime debug and delay parameters */
-int debug_mode = 0;
+int debug_level = 0;
 int readonly_mode = 0;
 int lowercase_mode = 0;
 unsigned char allowed_mac[6];
@@ -969,7 +969,8 @@ static void help(void) {
       "[rootpathN]\n"
       "\n"
       "Options:\n"
-      "  -d        Enable runtime debug logging\n"
+      "  -d        Enable runtime debug logging (use -dd for raw ethernet "
+      "frames)\n"
       "  -f        Keep in foreground (do not daemonize)\n"
       "  -l        Auto-lowercase new DOS files\n"
       "  -m <MAC>  Whitelist a specific MAC address (e.g. 00:11:22:33:44:55)\n"
@@ -1022,7 +1023,7 @@ int main(int argc, char **argv) {
   while ((opt = getopt(argc, argv, "dflhm:rs:v:")) != -1) {
     switch (opt) {
     case 'd': /* -d: enable debug mode */
-      debug_mode = 1;
+      debug_level++;
       break;
     case 'f': /* -f: no daemon */
       daemon = 0;
@@ -1147,6 +1148,27 @@ int main(int argc, char **argv) {
     if (len < 60)
       continue; /* restart if less than 60 bytes or negative */
 
+    /* track new MACs to announce connections */
+    {
+      static unsigned char known_macs[16][6];
+      static int known_macs_cnt = 0;
+      int m_idx, found = 0;
+      for (m_idx = 0; m_idx < known_macs_cnt; m_idx++) {
+        if (memcmp(known_macs[m_idx], buff + 6, 6) == 0) {
+          found = 1;
+          break;
+        }
+      }
+      if (!found) {
+        printf("Client connected from MAC %s\n", printmac(buff + 6));
+        fflush(stdout); /* Ensure it prints immediately even if
+                           daemonized/redirected */
+        if (known_macs_cnt < 16) {
+          memcpy(known_macs[known_macs_cnt++], buff + 6, 6);
+        }
+      }
+    }
+
     /* enforce MAC ACL if set */
     if (allowed_mac_set && memcmp(allowed_mac, buff + 6, 6) != 0) {
       continue; /* ignore frame from unauthorized MAC */
@@ -1182,7 +1204,7 @@ int main(int argc, char **argv) {
       continue;
     } else { /* edf5framelen seems sane, use it instead of the Ethernet lenght
               */
-      if (debug_mode && len != edf5framelen) {
+      if (debug_level > 0 && len != edf5framelen) {
         DBG("Note: Received frame with padding from %s (edf5len = %u, ethernet "
             "len = %u)\n",
             printmac(buff + 6), edf5framelen, len);
@@ -1190,9 +1212,13 @@ int main(int argc, char **argv) {
       len = edf5framelen;
     }
     /* */
-    if (debug_mode) {
+    if (debug_level > 0) {
       DBG("Received frame of %d bytes (cksum = %s)\n", len,
           (cksumflag != 0) ? "ENABLED" : "DISABLED");
+    }
+    if (debug_level >= 2) {
+      printf("--- RAW RX ---\n");
+      dumpframe(buff, len);
     }
 #if SIMLOSS > 0
     /* simulated frame LOSS (input) */
@@ -1248,8 +1274,12 @@ int main(int argc, char **argv) {
         cacheptr->frame[55] = 0;
         cacheptr->frame[56] &= 127; /* make sure to reset the CKS bit */
       }
-      if (debug_mode) {
+      if (debug_level > 0) {
         DBG("Sending back an answer of %d bytes\n", len);
+      }
+      if (debug_level >= 2) {
+        printf("--- RAW TX ---\n");
+        dumpframe(cacheptr->frame, len);
       }
       i = send(sock, cacheptr->frame, len, 0);
       if (i < 0) {
