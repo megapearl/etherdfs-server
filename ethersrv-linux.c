@@ -555,20 +555,45 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
     } else {
       /* query is LSSS...DDD... */
       char fn1[1024], fn2[1024];
-      int fn1len, fn2len, offset;
-      offset = sprintf(fn1, "%s/", root);
-      sprintf(fn2, "%s/", root);
+      char dos_fn1[256], dos_fn2[256];
+      int fn1len, fn2len;
       fn1len = reqbuff[0];
       fn2len = reqbufflen - (1 + fn1len);
       if (reqbufflen > fn1len) {
-        memcpy(fn1 + offset, reqbuff + 1, fn1len);
-        fn1[fn1len + offset] = 0;
-        lostring(fn1 + offset, -1);
-        charreplace(fn1, '\\', '/');
-        memcpy(fn2 + offset, reqbuff + 1 + fn1len, fn2len);
-        fn2[fn2len + offset] = 0;
-        lostring(fn2 + offset, -1);
-        charreplace(fn2, '\\', '/');
+        memcpy(dos_fn1, reqbuff + 1, fn1len);
+        dos_fn1[fn1len] = 0;
+        lostring(dos_fn1, -1);
+        charreplace(dos_fn1, '\\', '/');
+
+        memcpy(dos_fn2, reqbuff + 1 + fn1len, fn2len);
+        dos_fn2[fn2len] = 0;
+        lostring(dos_fn2, -1);
+        charreplace(dos_fn2, '\\', '/');
+
+        resolve_path(fn1, root, dos_fn1);
+        resolve_path(fn2, root, dos_fn2);
+
+        /* Enhancement: if the dos basename didn't change (a DOS move command), 
+           we should preserve the original LFN basename from the source. */
+        {
+          char *dos_base1 = dos_fn1;
+          char *dos_base2 = dos_fn2;
+          char *p;
+          for (p = dos_fn1; *p; p++) if (*p == '/') dos_base1 = p + 1;
+          for (p = dos_fn2; *p; p++) if (*p == '/') dos_base2 = p + 1;
+
+          if (strcmp(dos_base1, dos_base2) == 0) {
+            char *lfn_base = fn1;
+            char *fn2_dir = fn2;
+            for (p = fn1; *p; p++) if (*p == '/') lfn_base = p + 1;
+            for (p = fn2; *p; p++) if (*p == '/') fn2_dir = p + 1;
+
+            if (fn2_dir > fn2) {
+              strcpy(fn2_dir, lfn_base); /* Replace destination leaf with true LFN leaf */
+            }
+          }
+        }
+
         DBG("RENAME src='%s' dst='%s'\n", fn1, fn2);
         /* if fn2 destination exists, abort with errcode=5 (as does MS-DOS 5) */
         if (getitemattr(fn2, NULL, 0) != 0xff) {
