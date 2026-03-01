@@ -1,0 +1,3 @@
+REPO_DESCRIPTION="EtherDFS Linux Server in a Docker container, optimized for TrueNAS SCALE. Serving files to vintage MS-DOS machines over raw Ethernet."
+REPO_WEBSITE="https://github.com/megapearl/etherdfs-server"
+REPO_TOPICS="etherdfs, dos, retrogaming, truenas-scale, docker, server, ethernet, linux"
