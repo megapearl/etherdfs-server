@@ -502,6 +502,10 @@ int createfile(struct fileprops *f, char *d, char *fn, unsigned char attr,
   if (fd == NULL)
     return (-1);
   fclose(fd);
+
+  /* ensure file is mutually writable by others on the host system too */
+  chmod(fullpath, 0666);
+
   /* set attribs (only if FAT drive) */
   if (fatflag != 0) {
     if (setitemattr(fullpath, attr) != 0)
@@ -528,7 +532,7 @@ unsigned long long diskinfo(char *path, unsigned long long *dfree) {
 }
 
 /* try to create directory, return 0 on success, non-zero otherwise */
-int makedir(char *d) { return (mkdir(d, 0)); }
+int makedir(char *d) { return (mkdir(d, 0777)); }
 
 /* try to remove directory, return 0 on success, non-zero otherwise */
 int remdir(char *d) {

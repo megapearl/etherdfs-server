@@ -42,6 +42,7 @@
 #include <string.h> /* mempcy() */
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <time.h>   /* time() */
 #include <unistd.h> /* close(), getopt(), optind */
 
@@ -573,23 +574,33 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
         resolve_path(fn1, root, dos_fn1);
         resolve_path(fn2, root, dos_fn2);
 
-        /* Enhancement: if the dos basename didn't change (a DOS move command), 
+        /* Enhancement: if the dos basename didn't change (a DOS move command),
            we should preserve the original LFN basename from the source. */
         {
           char *dos_base1 = dos_fn1;
           char *dos_base2 = dos_fn2;
           char *p;
-          for (p = dos_fn1; *p; p++) if (*p == '/') dos_base1 = p + 1;
-          for (p = dos_fn2; *p; p++) if (*p == '/') dos_base2 = p + 1;
+          for (p = dos_fn1; *p; p++)
+            if (*p == '/')
+              dos_base1 = p + 1;
+          for (p = dos_fn2; *p; p++)
+            if (*p == '/')
+              dos_base2 = p + 1;
 
           if (strcmp(dos_base1, dos_base2) == 0) {
             char *lfn_base = fn1;
             char *fn2_dir = fn2;
-            for (p = fn1; *p; p++) if (*p == '/') lfn_base = p + 1;
-            for (p = fn2; *p; p++) if (*p == '/') fn2_dir = p + 1;
+            for (p = fn1; *p; p++)
+              if (*p == '/')
+                lfn_base = p + 1;
+            for (p = fn2; *p; p++)
+              if (*p == '/')
+                fn2_dir = p + 1;
 
             if (fn2_dir > fn2) {
-              strcpy(fn2_dir, lfn_base); /* Replace destination leaf with true LFN leaf */
+              strcpy(
+                  fn2_dir,
+                  lfn_base); /* Replace destination leaf with true LFN leaf */
             }
           }
         }
@@ -1117,6 +1128,11 @@ int main(int argc, char **argv) {
       return (1);
     }
   }
+
+  /* Set umask to 0 so we can explicitly configure 0777 for dirs and 0666 for
+     files without the host system stripping away group/other write permissions
+   */
+  umask(0);
 
   /* main loop */
   while (terminationflag == 0) {
