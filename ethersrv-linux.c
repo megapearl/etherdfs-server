@@ -112,6 +112,10 @@ unsigned char allowed_mac[6];
 int allowed_mac_set = 0;
 unsigned int target_delay_ms = 0;
 
+/* live throughput statistics */
+unsigned long long stat_bytes_read = 0;
+unsigned long long stat_bytes_written = 0;
+
 void sigcatcher(int sig) {
   switch (sig) {
   case SIGTERM:
@@ -308,6 +312,7 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
       fprintf(stderr, "ERROR: invalid handle\n");
       *ax = 5; /* "access denied" */
     } else {
+      stat_bytes_read += readlen;
       reslen += readlen;
     }
   } else if ((query == AL_WRITEFIL) && (reqbufflen >= 6)) { /* AL=09h */
@@ -325,6 +330,7 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
       if (writelen < 0) {
         *ax = 5; /* "access denied" */
       } else {
+        stat_bytes_written += writelen;
         wansw[0] = htole16(writelen);
         reslen += 2;
       }
@@ -1135,6 +1141,9 @@ int main(int argc, char **argv) {
    */
   umask(0);
 
+  /* throughput timer */
+  time_t last_stat_time = time(NULL);
+
   /* main loop */
   while (terminationflag == 0) {
     struct timeval stimeout = {10, 0}; /* set timeout to 10s */
@@ -1144,6 +1153,24 @@ int main(int argc, char **argv) {
     FD_SET(sock, &fdset);
     /* wait for something to happen on my socket */
     select(sock + 1, &fdset, NULL, &fdset, &stimeout);
+
+    /* Check throughput statistics */
+    {
+      time_t current_time = time(NULL);
+      if (current_time != last_stat_time) {
+        unsigned long long total_bytes = stat_bytes_read + stat_bytes_written;
+        /* Print only if > 50 KB/s combined throughput */
+        if (total_bytes > (50ULL * 1024ULL)) {
+          printf("[Throughput] Read: %llu KB/s | Write: %llu KB/s\n",
+                 stat_bytes_read / 1024ULL, stat_bytes_written / 1024ULL);
+          fflush(stdout);
+        }
+        stat_bytes_read = 0;
+        stat_bytes_written = 0;
+        last_stat_time = current_time;
+      }
+    }
+
     len = recv(sock, buff, sizeof(buff), MSG_DONTWAIT);
     if (len < 60)
       continue; /* restart if less than 60 bytes or negative */
