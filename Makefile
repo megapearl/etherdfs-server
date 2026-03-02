@@ -6,6 +6,11 @@
 #
 
 CFLAGS = -O2 -Wall -std=gnu89 -pedantic -Wextra -s -Wno-long-long -Wno-variadic-macros -Wformat-security
+
+ifdef VERSION
+CFLAGS += -DPVER=\"$(VERSION)\"
+endif
+
 LDFLAGS = -lpcap
 
 CC = gcc

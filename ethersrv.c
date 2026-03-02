@@ -66,7 +66,9 @@
 #include "lock.h"
 
 /* program version */
+#ifndef PVER
 #define PVER "v0.3.11-PRO"
+#endif
 
 /* protocol version (single byte, must be in sync with etherdfs) */
 #define PROTOVER 2
