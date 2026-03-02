@@ -131,3 +131,14 @@ dmypy.json
 cython_debug/
 
 .dockerignore
+
+# Compiled Server Binaries
+ethersrv-linux
+test_sfn
+
+# Compiled Client Binaries and Output
+client/bin/ETHERDFS.EXE
+*.err
+*.map
+*.obj
+

@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+**/.env
+.git
+.vscode/
+*.db
+*.sqlite
+data/
+ethersrv-linux
+*.oclient/
+
