@@ -29,7 +29,7 @@ if ! ip link show "$INTERFACE" > /dev/null 2>&1; then
     exit 1
 fi
 
-echo "Starting ethersrv-linux on interface $INTERFACE..."
+echo "Starting ethersrv on interface $INTERFACE..."
 
 # Build up the arguments array dynamically
 ARGS="-f"
@@ -65,4 +65,4 @@ if [ -n "$ETHERDFS_DELAY" ] && [ "$ETHERDFS_DELAY" -gt 0 ] 2>/dev/null; then
 fi
 
 # The eval is necessary because ARGS contains quotes around the volume label
-eval "exec ethersrv-linux $ARGS \"$INTERFACE\" /data"
+eval "exec ethersrv $ARGS \"$INTERFACE\" /data"

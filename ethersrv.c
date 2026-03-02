@@ -31,9 +31,8 @@
 #include <arpa/inet.h> /* htons() */
 #include <endian.h>    /* le16toh(), le32toh() */
 #include <errno.h>
-#include <limits.h> /* PATH_MAX and such */
-#include <linux/if_packet.h>
-#include <net/ethernet.h>
+#include <ifaddrs.h> /* getifaddrs() */
+#include <limits.h>  /* PATH_MAX and such */
 #include <net/if.h>
 #include <signal.h>
 #include <stdint.h> /* uint16_t, uint32_t */
@@ -47,6 +46,20 @@
 #include <sys/types.h>
 #include <time.h>   /* time() */
 #include <unistd.h> /* close(), getopt(), optind */
+
+#ifdef __linux__
+#include <linux/if_packet.h>
+#include <netinet/ether.h> /* ETH_ALEN on Linux */
+
+#else
+#include <net/ethernet.h> /* ETHER_ADDR_LEN on BSD/macOS */
+#include <net/if_dl.h>    /* sockaddr_dl on BSD/macOS */
+
+#ifndef ETH_ALEN
+#define ETH_ALEN ETHER_ADDR_LEN
+#endif
+#endif
+#include <pcap.h>
 
 #include "debug.h"
 #include "fs.h"
@@ -838,70 +851,110 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
   return (reslen + 60);
 }
 
-static int raw_sock(const int protocol, const char *const interface,
-                    void *const hwaddr) {
-  struct ifreq iface;
-  struct sockaddr_ll addr;
-  int socketfd, result;
-  int ifindex;
+static pcap_t *raw_sock(const int protocol, const char *const interface,
+                        void *const hwaddr) {
+  pcap_t *handle;
+  char errbuf[PCAP_ERRBUF_SIZE];
+  struct bpf_program fp;
+  char filter_exp[32];
+  struct ifaddrs *ifap, *ifa;
+  int mac_found = 0;
 
   if ((interface == NULL) || (*interface == 0)) {
     errno = EINVAL;
-    return (-1);
+    return (NULL);
   }
 
-  socketfd = socket(AF_PACKET, SOCK_RAW, htons(protocol));
-  if (socketfd == -1)
-    return (-1);
-
-  do {
-    memset(&iface, 0, sizeof iface);
-    strncpy((char *)&iface.ifr_name, interface, IFNAMSIZ);
-    result = ioctl(socketfd, SIOCGIFINDEX, &iface);
-    if (result == -1)
-      break;
-    ifindex = iface.ifr_ifindex;
-
-    memset(&iface, 0, sizeof(iface));
-    strncpy((char *)&iface.ifr_name, interface, IFNAMSIZ);
-    result = ioctl(socketfd, SIOCGIFFLAGS, &iface);
-    if (result == -1)
-      break;
-    iface.ifr_flags |= IFF_PROMISC;
-    result = ioctl(socketfd, SIOCSIFFLAGS, &iface);
-    if (result == -1)
-      break;
-
-    memset(&iface, 0, sizeof iface);
-    strncpy((char *)&iface.ifr_name, interface, IFNAMSIZ);
-    result = ioctl(socketfd, SIOCGIFHWADDR, &iface);
-    if (result == -1)
-      break;
-
-    memset(&addr, 0, sizeof addr);
-    addr.sll_family = AF_PACKET;
-    addr.sll_protocol = htons(protocol);
-    addr.sll_ifindex = ifindex;
-    addr.sll_hatype = 0;
-    addr.sll_pkttype = PACKET_HOST | PACKET_BROADCAST;
-    addr.sll_halen = ETH_ALEN; /* Assume ethernet! */
-    memcpy(&addr.sll_addr, &iface.ifr_hwaddr.sa_data, addr.sll_halen);
-    if (hwaddr != NULL)
-      memcpy(hwaddr, &iface.ifr_hwaddr.sa_data, ETH_ALEN);
-
-    if (bind(socketfd, (struct sockaddr *)&addr, sizeof addr))
-      break;
-
-    errno = 0;
-    return (socketfd);
-  } while (0);
-
-  {
-    const int saved_errno = errno;
-    close(socketfd);
-    errno = saved_errno;
-    return (-1);
+  /* Extract MAC address cross-platform */
+  if (getifaddrs(&ifap) == 0) {
+    for (ifa = ifap; ifa != NULL; ifa = ifa->ifa_next) {
+      if (ifa->ifa_name && strcmp(ifa->ifa_name, interface) == 0) {
+#ifdef __linux__
+        /* Linux: usually requires ioctl for MAC if not using AF_PACKET
+         * sockaddr_ll directly */
+        struct ifreq ifr;
+        int sockfd;
+        sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+        if (sockfd >= 0) {
+          strcpy(ifr.ifr_name, interface);
+          if (ioctl(sockfd, SIOCGIFHWADDR, &ifr) == 0) {
+            if (hwaddr != NULL)
+              memcpy(hwaddr, ifr.ifr_hwaddr.sa_data, ETH_ALEN);
+            mac_found = 1;
+          }
+          close(sockfd);
+        }
+        if (mac_found)
+          break;
+#else
+        /* BSD/macOS: sockaddr_dl */
+        if (ifa->ifa_addr && ifa->ifa_addr->sa_family == AF_LINK) {
+          struct sockaddr_dl *sdl = (struct sockaddr_dl *)ifa->ifa_addr;
+          if (sdl->sdl_type == IFT_ETHER) {
+            if (hwaddr != NULL)
+              memcpy(hwaddr, LLADDR(sdl), ETH_ALEN);
+            mac_found = 1;
+            break;
+          }
+        }
+#endif
+      }
+    }
+    freeifaddrs(ifap);
   }
+
+  if (!mac_found) {
+    fprintf(stderr, "Error: Could not determine MAC address for interface %s\n",
+            interface);
+    return NULL;
+  }
+
+  /* Create pcap handle */
+  handle = pcap_create(interface, errbuf);
+  if (handle == NULL) {
+    fprintf(stderr, "pcap_create() failed: %s\n", errbuf);
+    return NULL;
+  }
+
+  /* Set promiscuous mode to capture raw ethernet frames targeting us and
+   * broadcast */
+  pcap_set_promisc(handle, 1);
+  /* Set a short timeout (e.g. 1ms) so pcap_next_ex can return relatively
+   * quickly if no packet */
+  pcap_set_timeout(handle, 1);
+  /* Disable immediate mode if available to potentially optimize, but for
+   * low-latency usually immediate=1 */
+  pcap_set_immediate_mode(handle, 1);
+
+  if (pcap_activate(handle) != 0) {
+    fprintf(stderr, "pcap_activate() failed: %s\n", pcap_geterr(handle));
+    pcap_close(handle);
+    return NULL;
+  }
+
+  /* Compile and apply BPF filter natively within libpcap to drop unwanted
+   * traffic */
+  sprintf(filter_exp, "ether proto 0x%04X", protocol);
+  if (pcap_compile(handle, &fp, filter_exp, 0, PCAP_NETMASK_UNKNOWN) == -1) {
+    fprintf(stderr, "pcap_compile() failed: %s\n", pcap_geterr(handle));
+    pcap_close(handle);
+    return NULL;
+  }
+  if (pcap_setfilter(handle, &fp) == -1) {
+    fprintf(stderr, "pcap_setfilter() failed: %s\n", pcap_geterr(handle));
+    pcap_freecode(&fp);
+    pcap_close(handle);
+    return NULL;
+  }
+  pcap_freecode(&fp);
+
+  /* Set non-blocking mode like MSG_DONTWAIT in recv */
+  if (pcap_setnonblock(handle, 1, errbuf) == -1) {
+    fprintf(stderr, "Warning: pcap_setnonblock() failed: %s\n", errbuf);
+  }
+
+  errno = 0;
+  return handle;
 }
 
 /* used for debug output of frames on screen */
@@ -1017,7 +1070,11 @@ static char *printmac(unsigned char *b) {
 }
 
 int main(int argc, char **argv) {
-  int sock, len, i;
+  int len, i;
+  pcap_t *handle;
+  int pcap_fd;
+  const unsigned char *pcap_buff;
+  struct pcap_pkthdr *pcap_header;
   unsigned char buff[2048];
   unsigned char cksumflag;
   unsigned short edf5framelen;
@@ -1098,16 +1155,17 @@ int main(int argc, char **argv) {
     }
   }
 
-  sock = raw_sock(0xEDF5, intname, mymac);
-  if (sock == -1) {
+  handle = raw_sock(0xEDF5, intname, mymac);
+  if (handle == NULL) {
     fprintf(stderr,
-            "Error: failed to open socket (%s)\n"
+            "Error: failed to open pcap handle (%s)\n"
             "\n"
-            "Usually ethersrv-linux requires to be launched as root to\n"
-            "be able to handle raw (ethernet) sockets. Are you root?\n",
+            "Usually ethersrv requires to be launched as root to\n"
+            "be able to handle raw ethernet devices. Are you root?\n",
             strerror(errno));
     return (1);
   }
+  pcap_fd = pcap_get_selectable_fd(handle);
 
   /* setup signals catcher */
   signal(SIGTERM, sigcatcher);
@@ -1151,8 +1209,11 @@ int main(int argc, char **argv) {
   /* throughput timer */
   /* throughput timer using gettimeofday instead of whole seconds */
   struct timeval stat_tv;
+  double last_stat_time;
+  int pcap_res;
+
   gettimeofday(&stat_tv, NULL);
-  double last_stat_time = stat_tv.tv_sec + (stat_tv.tv_usec / 1000000.0);
+  last_stat_time = stat_tv.tv_sec + (stat_tv.tv_usec / 1000000.0);
 
   /* main loop */
   while (terminationflag == 0) {
@@ -1161,16 +1222,28 @@ int main(int argc, char **argv) {
     /* prepare the set of descriptors to be monitored later through select() */
     fd_set fdset;
     FD_ZERO(&fdset);
-    FD_SET(sock, &fdset);
-    /* wait for something to happen on my socket */
-    select(sock + 1, &fdset, NULL, &fdset, &stimeout);
+    if (pcap_fd >= 0) {
+      /* pass the fdset back into select as readFD, writeFD, AND exceptFD */
+      fd_set writeFds;
+      fd_set exceptFds;
+      FD_SET(pcap_fd, &fdset);
+      writeFds = fdset;
+      exceptFds = fdset;
+      select(pcap_fd + 1, &fdset, &writeFds, &exceptFds, &stimeout);
+    } else {
+      /* Polling fallback if selectable FD is not supported on this platform */
+      struct timeval tv;
+      tv.tv_sec = 0;
+      tv.tv_usec = 1000;
+      select(0, NULL, NULL, NULL, &tv);
+    }
 
     /* Check throughput statistics */
     {
       struct timeval current_tv;
+      double current_time;
       gettimeofday(&current_tv, NULL);
-      double current_time =
-          current_tv.tv_sec + (current_tv.tv_usec / 1000000.0);
+      current_time = current_tv.tv_sec + (current_tv.tv_usec / 1000000.0);
 
       if (current_time - last_stat_time >= 1.0) {
         unsigned long long total_bytes = stat_bytes_read + stat_bytes_written;
@@ -1187,7 +1260,15 @@ int main(int argc, char **argv) {
       }
     }
 
-    len = recv(sock, buff, sizeof(buff), MSG_DONTWAIT);
+    /* fetch packet via libpcap */
+    pcap_res = pcap_next_ex(handle, &pcap_header, &pcap_buff);
+    if (pcap_res <= 0) {
+      continue; /* Timeout, EOF, or error - loop again */
+    }
+    len = pcap_header->caplen;
+    if ((long unsigned int)len > sizeof(buff))
+      len = sizeof(buff);
+    memcpy(buff, pcap_buff, len);
 
     /* If we received at least an Ethernet MAC header, track MACs for connection
      * logging */
@@ -1327,11 +1408,13 @@ int main(int argc, char **argv) {
         printf("--- RAW TX ---\n");
         dumpframe(cacheptr->frame, len);
       }
-      i = send(sock, cacheptr->frame, len, 0);
+      i = pcap_inject(handle, cacheptr->frame, len);
       if (i < 0) {
-        fprintf(stderr, "ERROR: send() returned %d (%s)\n", i, strerror(errno));
+        fprintf(stderr, "ERROR: pcap_inject() returned %s\n",
+                pcap_geterr(handle));
       } else if (i != len) {
-        fprintf(stderr, "ERROR: send() sent less than expected (%d != %d)\n", i,
+        fprintf(stderr,
+                "ERROR: pcap_inject() sent less than expected (%d != %d)\n", i,
                 len);
       }
     } else {

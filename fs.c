@@ -6,7 +6,9 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#ifdef __linux__
 #include <linux/msdos_fs.h>
+#endif
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h> /* free() */
@@ -108,7 +110,6 @@ void lfn2sfn(char *sfn, const char *lfn, int collision_idx) {
   int i, j = 0, ext_idx = -1;
   char basen[9] = {0};
   char extn[4] = {0};
-  char extptr[256];
 
   /* explicitly preserve '.' and '..' */
   if (strcmp(lfn, ".") == 0 || strcmp(lfn, "..") == 0) {
@@ -149,12 +150,12 @@ void lfn2sfn(char *sfn, const char *lfn, int collision_idx) {
    * when requested) */
   if (collision_idx > 0) {
     char suffix[6];
-    int suflen = sprintf(suffix, "~%d", collision_idx);
+    int suflen = snprintf(suffix, sizeof(suffix), "~%d", collision_idx);
     int baselen = strlen(basen);
     if (baselen + suflen > 8) {
       baselen = 8 - suflen;
     }
-    sprintf(basen + baselen, "%s", suffix);
+    snprintf(basen + baselen, 9 - baselen, "%s", suffix);
   }
 
   /* format into 8.3 */
@@ -273,11 +274,12 @@ unsigned char getitemattr(char *i, struct fileprops *fprops,
   /* if not a FAT drive, return a fake attribute of 0x20 (archive) */
   if (fatflag == 0)
     return (0x20);
+#ifdef __linux__
   /* try to fetch DOS attributes by calling the FAT IOCTL API */
   fd = open(i, O_RDONLY);
   if (fd == -1)
     return (0xff);
-  if (ioctl(fd, FAT_IOCTL_GET_ATTRIBUTES, &attr) < 0) {
+  if (ioctl(fd, (int)FAT_IOCTL_GET_ATTRIBUTES, &attr) < 0) {
     fprintf(stderr, "Failed to fetch attributes of '%s'\n", i);
     close(fd);
     return (0);
@@ -287,19 +289,30 @@ unsigned char getitemattr(char *i, struct fileprops *fprops,
       fprops->fattr = attr;
     return (attr);
   }
+#else
+  /* On non-Linux, simulate archive bit for all FAT formatted files as fallback
+   */
+  return (0x20);
+#endif
 }
 
 /* set attributes fattr on file i. returns 0 on success, non-zero otherwise. */
 int setitemattr(char *i, unsigned char fattr) {
+#ifdef __linux__
   int fd, res;
   fd = open(i, O_RDONLY);
   if (fd == -1)
     return (-1);
-  res = ioctl(fd, FAT_IOCTL_SET_ATTRIBUTES, &fattr);
+  res = ioctl(fd, (int)FAT_IOCTL_SET_ATTRIBUTES, &fattr);
   close(fd);
   if (res < 0)
     return (-1);
   return (0);
+#else
+  /* On non-Linux systems, we do not support setting DOS FAT attributes natively
+   */
+  return (0);
+#endif
 }
 
 /* generates a directory listing for *root and returns the number of file
@@ -393,8 +406,8 @@ static long gendirlist(struct sfsdb *root, unsigned char fatflag,
 
     /* Generate unique SFN */
     do {
-      lfn2sfn(tempsfn, diridx->d_name, collision_idx);
       int collision_found = 0;
+      lfn2sfn(tempsfn, diridx->d_name, collision_idx);
       for (checknode = root->dirlist; checknode != NULL;
            checknode = checknode->next) {
         if (strcmp(checknode->sfn_name, tempsfn) == 0) {
@@ -695,18 +708,24 @@ int renfile(char *fn1, char *fn2) { return (rename(fn1, fn2)); }
 /* checks if a path resides on a FAT filesystem, returns 0 if so, non-zero
  * otherwise */
 int isfat(char *d) {
+#ifdef __linux__
   int fd;
   uint32_t volid;
   /* test if I can fetch the serial id through calling the FAT IOCTL API */
   fd = open(d, O_RDONLY);
   if (fd == -1)
     return (-1);
-  if (ioctl(fd, FAT_IOCTL_GET_VOLUME_ID, &volid) < 0) {
+  if (ioctl(fd, (int)FAT_IOCTL_GET_VOLUME_ID, (int *)&volid) < 0) {
     close(fd);
     return (-1);
   }
   close(fd);
   return (0);
+#else
+  /* without Linux ioctls, fallback to treating it as non-FAT so attributes
+   * aren't used */
+  return (-1);
+#endif
 }
 
 /* returns the size of an open file (or -1 on error) */
@@ -758,9 +777,9 @@ static void resolve_sfn_in_dir(char *actual_name, const char *dir_path,
       continue;
 
     if (count >= capacity) {
+      struct sfn_entry *new_sfns;
       capacity *= 2;
-      struct sfn_entry *new_sfns =
-          realloc(local_sfns, capacity * sizeof(struct sfn_entry));
+      new_sfns = realloc(local_sfns, capacity * sizeof(struct sfn_entry));
       if (new_sfns == NULL) {
         break; /* Out of memory, process what we have so far */
       }
