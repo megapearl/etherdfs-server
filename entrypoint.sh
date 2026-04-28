@@ -31,6 +31,13 @@ fi
 
 echo "Starting ethersrv on interface $INTERFACE..."
 
+# Stale lock file van een vorige (niet-clean) shutdown verwijderen.
+# Zonder dit blijft ethersrv crashloopen na een power-outage.
+if [ -f /var/run/ethersrv.lock ]; then
+    echo "Removing stale lock file /var/run/ethersrv.lock"
+    rm -f /var/run/ethersrv.lock
+fi
+
 # Build up the arguments array dynamically
 ARGS="-f"
 
