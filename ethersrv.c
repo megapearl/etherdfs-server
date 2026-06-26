@@ -950,10 +950,10 @@ static pcap_t *raw_sock(const int protocol, const char *const interface,
   }
   pcap_freecode(&fp);
 
-  /* Set non-blocking mode like MSG_DONTWAIT in recv */
-  if (pcap_setnonblock(handle, 1, errbuf) == -1) {
-    fprintf(stderr, "Warning: pcap_setnonblock() failed: %s\n", errbuf);
-  }
+  /* Keep the pcap handle in BLOCKING mode so select() on its selectable fd
+   * waits correctly. Non-blocking mode makes select()/poll() on the pcap fd
+   * unreliable and contributed to the idle busy-spin. The pcap read timeout set
+   * above bounds pcap_next_ex() so it still returns promptly when idle. */
 
   errno = 0;
   return handle;
@@ -1225,13 +1225,13 @@ int main(int argc, char **argv) {
     fd_set fdset;
     FD_ZERO(&fdset);
     if (pcap_fd >= 0) {
-      /* pass the fdset back into select as readFD, writeFD, AND exceptFD */
-      fd_set writeFds;
-      fd_set exceptFds;
+      /* Wait until the capture fd is READABLE (a frame arrived) or the 1s
+       * timeout. Monitor read only: a packet-capture fd is effectively always
+       * "writable", so also passing it as the write/except set made select()
+       * return immediately on every iteration -> the loop busy-spun a CPU core
+       * at 100% even when the link was idle (0 pps). */
       FD_SET(pcap_fd, &fdset);
-      writeFds = fdset;
-      exceptFds = fdset;
-      select(pcap_fd + 1, &fdset, &writeFds, &exceptFds, &stimeout);
+      select(pcap_fd + 1, &fdset, NULL, NULL, &stimeout);
     } else {
       /* Polling fallback if selectable FD is not supported on this platform */
       struct timeval tv;
