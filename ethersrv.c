@@ -187,6 +187,12 @@ static struct struct_answcache *findcacheentry(unsigned char *clientmac) {
 /* checks wheter dir is belonging to the root directory. returns 0 if so, 1
  * otherwise */
 static int isroot(char *root, char *dir) {
+  /* dir may be NULL if the directory's cache slot was evicted between
+   * FindFirst and FindNext (sstoitem() then returns NULL). Treat that as
+   * 'not root' instead of dereferencing NULL; findfile() will subsequently
+   * report 'no more files' for the missing slot. */
+  if ((root == NULL) || (dir == NULL))
+    return (0);
   /* fast-forward to the 'virtual directory' part */
   while ((*root != 0) && (*dir != 0)) {
     root++;

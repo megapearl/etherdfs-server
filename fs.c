@@ -315,6 +315,28 @@ int setitemattr(char *i, unsigned char fattr) {
 #endif
 }
 
+/* directory entry used for deterministic SFN (~N) assignment, shared between
+ * gendirlist() and resolve_sfn_in_dir() */
+struct sfn_entry {
+  char lfn[256];
+  char sfn[14];
+};
+
+/* qsort() comparators. A stable, deterministic name order is REQUIRED so that
+ * gendirlist() and resolve_sfn_in_dir() assign identical ~N short-name
+ * collision suffixes to the same long name. readdir() does not guarantee the
+ * same order across two scans of one directory, so without sorting a short
+ * name presented by FindFirst could resolve to a DIFFERENT real file on the
+ * follow-up open/create -- a wrong-file / data-corruption hazard. */
+static int cmp_names(const void *a, const void *b) {
+  return (strcmp(*(const char *const *)a, *(const char *const *)b));
+}
+
+static int cmp_sfn_entry(const void *a, const void *b) {
+  return (strcmp(((const struct sfn_entry *)a)->lfn,
+                 ((const struct sfn_entry *)b)->lfn));
+}
+
 /* generates a directory listing for *root and returns the number of file
  * system entries, or a negative value on error */
 static long gendirlist(struct sfsdb *root, unsigned char fatflag,
@@ -390,53 +412,82 @@ static long gendirlist(struct sfsdb *root, unsigned char fatflag,
     }
   }
 
-  for (;;) {
-    int collision_idx = 0;
-    char tempsfn[14];
+  /* Collect all directory entries first, then process them in a deterministic
+   * (sorted) order so that ~N short-name collision suffixes are assigned
+   * identically here and in resolve_sfn_in_dir() (see cmp_names note above). */
+  {
+    char **names = NULL;
+    long ncount = 0, ncap = 0, ni;
 
-    diridx = readdir(dp);
-    if (diridx == NULL)
-      break;
-    newnode = calloc(1, sizeof(struct sdirlist));
-    if (newnode == NULL) {
-      fprintf(stderr, "ERROR: out of mem!");
-      break;
-    }
-    sprintf(fullpath + fullpathoffset, "%s", diridx->d_name);
-
-    /* Generate unique SFN */
-    do {
-      int collision_found = 0;
-      lfn2sfn(tempsfn, diridx->d_name, collision_idx);
-      for (checknode = root->dirlist; checknode != NULL;
-           checknode = checknode->next) {
-        if (strcmp(checknode->sfn_name, tempsfn) == 0) {
-          collision_found = 1;
-          break;
-        }
+    while ((diridx = readdir(dp)) != NULL) {
+      char *dup;
+      if (ncount == ncap) {
+        char **tmp;
+        ncap = (ncap == 0) ? 64 : ncap * 2;
+        tmp = realloc(names, ncap * sizeof(char *));
+        if (tmp == NULL)
+          break; /* out of mem: proceed with what we collected so far */
+        names = tmp;
       }
-      if (!collision_found)
+      dup = strdup(diridx->d_name);
+      if (dup == NULL)
         break;
-      collision_idx++;
-    } while (collision_idx < 9999);
-
-    strcpy(newnode->sfn_name, tempsfn);
-
-    /* When getting attributes, use the generated SFN so FCB is based on SFN */
-    getitemattr(fullpath, &(newnode->fprops), fatflag);
-    /* Override fcbname in fprops with the generated SFN, not the long name */
-    filename2fcb(newnode->fprops.fcbname, tempsfn);
-
-    /* add new node to linked list */
-    if (lastnode == NULL) {
-      root->dirlist = newnode;
-    } else {
-      lastnode->next = newnode;
+      names[ncount++] = dup;
     }
-    lastnode = newnode;
-    res++;
+    closedir(dp);
+
+    if (names != NULL)
+      qsort(names, (size_t)ncount, sizeof(char *), cmp_names);
+
+    for (ni = 0; ni < ncount; ni++) {
+      int collision_idx = 0;
+      char tempsfn[14];
+
+      newnode = calloc(1, sizeof(struct sdirlist));
+      if (newnode == NULL) {
+        fprintf(stderr, "ERROR: out of mem!");
+        break;
+      }
+      sprintf(fullpath + fullpathoffset, "%s", names[ni]);
+
+      /* Generate unique SFN */
+      do {
+        int collision_found = 0;
+        lfn2sfn(tempsfn, names[ni], collision_idx);
+        for (checknode = root->dirlist; checknode != NULL;
+             checknode = checknode->next) {
+          if (strcmp(checknode->sfn_name, tempsfn) == 0) {
+            collision_found = 1;
+            break;
+          }
+        }
+        if (!collision_found)
+          break;
+        collision_idx++;
+      } while (collision_idx < 9999);
+
+      strcpy(newnode->sfn_name, tempsfn);
+
+      /* When getting attributes, use the generated SFN so FCB is based on SFN */
+      getitemattr(fullpath, &(newnode->fprops), fatflag);
+      /* Override fcbname in fprops with the generated SFN, not the long name */
+      filename2fcb(newnode->fprops.fcbname, tempsfn);
+
+      /* add new node to linked list */
+      if (lastnode == NULL) {
+        root->dirlist = newnode;
+      } else {
+        lastnode->next = newnode;
+      }
+      lastnode = newnode;
+      res++;
+    }
+
+    /* free the temporary name array */
+    for (ni = 0; ni < ncount; ni++)
+      free(names[ni]);
+    free(names);
   }
-  closedir(dp);
   return (res);
 }
 
@@ -450,6 +501,18 @@ int findfile(struct fileprops *f, unsigned short dss, char *fcbtmpl,
              const char *vollabel) {
   int n = 0;
   struct sdirlist *dirlist;
+  /* Guard against an evicted/empty directory slot: the fsdb cache can have
+   * been reclaimed (getitemss eviction) between FindFirst and FindNext.
+   * Without this, gendirlist() below would opendir(NULL) and the
+   * isroot()/sstoitem() caller would dereference NULL. Report 'no more
+   * files' instead of crashing or scanning the wrong directory. */
+  if (fsdb[dss].name == NULL)
+    return (-1);
+  /* Keep this directory 'hot' so it is not evicted from the cache while we
+   * are still walking it across FindFirst/FindNext. FindNext does not pass
+   * through getitemss(), so its lastused would otherwise go stale and make
+   * the slot a prime eviction target mid-enumeration. */
+  fsdb[dss].lastused = time(NULL);
   /* recompute the dir listing if operation is FFirst (nth == 0) or if no
    * cache found */
   if ((*nth == 0) || (fsdb[dss].dirlist == NULL)) {
@@ -744,10 +807,6 @@ long getfopsize(unsigned short fss) {
  */
 static void resolve_sfn_in_dir(char *actual_name, const char *dir_path,
                                const char *target_sfn) {
-  struct sfn_entry {
-    char lfn[256];
-    char sfn[14];
-  };
   struct sfn_entry *local_sfns;
   int capacity = 1024;
   DIR *dp;
@@ -790,6 +849,11 @@ static void resolve_sfn_in_dir(char *actual_name, const char *dir_path,
     count++;
   }
   closedir(dp);
+
+  /* Sort entries into the SAME deterministic order gendirlist() uses, so the
+   * ~N collision suffixes assigned below match the ones FindFirst handed to
+   * DOS (otherwise a short name could resolve to a different real file). */
+  qsort(local_sfns, (size_t)count, sizeof(struct sfn_entry), cmp_sfn_entry);
 
   /* Now generate SFNs in order and see if we find a match */
   for (i = 0; i < count; i++) {
