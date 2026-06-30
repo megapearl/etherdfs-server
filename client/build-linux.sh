@@ -13,7 +13,10 @@
 #     -v <repo>/client/src:/src:ro \
 #     -v <dir-with-this-script>:/host \
 #     -v owcache:/opt/ow \
-#     debian:stable-slim sh /host/build-linux.sh
+#     debian:stable-slim sh /host/build-linux.sh [VERSION]
+#
+# Optional [VERSION] arg (e.g. v0.1.0-dev.<git-sha>) is written into PVER so the
+# client reports the same version as the server; omit it to use the default.
 #
 # Two Linux adaptations (the program logic is unchanged):
 #  - the DOS-uppercase source filenames are lowercased to match the lowercase
@@ -52,6 +55,17 @@ for f in *; do
   [ "$f" != "$lc" ] && mv "$f" "$lc"
 done
 echo "files:"; ls
+
+# Optional version injection (arg $1, e.g. "v0.1.0-dev.<sha>") so the client
+# reports the SAME version as the server. Must run BEFORE genmsg (which bakes
+# PVER into the help banner) and before the wcl compile.
+VER="${1:-}"
+if [ -n "$VER" ]; then
+  sed -i 's/#define PVER "[^"]*"/#define PVER "'"$VER"'"/' version.h
+  echo "### PVER set to: $VER ###"
+else
+  echo "### no version arg; using VERSION.H default ($(grep '#define PVER' version.h)) ###"
+fi
 
 echo "### genmsg (native gcc) -> msg/*.c (forward-slash paths) ###"
 mkdir -p msg

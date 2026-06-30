@@ -358,7 +358,7 @@ static int cmp_sfn_entry(const void *a, const void *b) {
 /* generates a directory listing for *root and returns the number of file
  * system entries, or a negative value on error */
 static long gendirlist(struct sfsdb *root, unsigned char fatflag,
-                       const char *vollabel) {
+                       const char *vollabel, int is_root) {
   char fullpath[1024];
   int fullpathoffset;
   struct dirent *diridx;
@@ -372,11 +372,14 @@ static long gendirlist(struct sfsdb *root, unsigned char fatflag,
     return (-1);
   fullpathoffset = sprintf(fullpath, "%s/", root->name);
 
-  /* If this is the root directory (or any directory really, DOS usually only
-     sees VOL in root), we can inject a synthetic volume label based on the
-     directory name. We check if the name doesn't end with a slash, we extract
-     the basename. */
-  if (root->name[0] != 0 || (vollabel != NULL && vollabel[0] != 0)) {
+  /* Inject the synthetic volume label ONLY in the root directory (as upstream
+     ethersrv-linux does). Injecting it into every subdirectory broke DIR under
+     IBM PC DOS: DIR's label-phase FindFirst (search attr 0x08) succeeded in a
+     subdir, and PC-DOS then continued the file phase with a FindNext that still
+     carried attr 0x08 -- which only matches VOL nodes -- so findfile() returned
+     "no more files" and the whole listing came back empty. NC (no label probe)
+     and the more lenient MS-DOS/FreeDOS COMMAND.COM were unaffected. */
+  if (is_root && (root->name[0] != 0 || (vollabel != NULL && vollabel[0] != 0))) {
     char *basename = root->name;
     char *p;
     for (p = root->name; *p != 0; p++) {
@@ -538,7 +541,9 @@ int findfile(struct fileprops *f, unsigned short dss, char *fcbtmpl,
   /* recompute the dir listing if operation is FFirst (nth == 0) or if no
    * cache found */
   if ((*nth == 0) || (fsdb[dss].dirlist == NULL)) {
-    long count = gendirlist(&(fsdb[dss]), flags & FFILE_ISFAT, vollabel);
+    long count =
+        gendirlist(&(fsdb[dss]), flags & FFILE_ISFAT, vollabel,
+                   flags & FFILE_ISROOT);
     if (count < 0) {
       fprintf(stderr, "Error: failed to scan dir '%s'\n", fsdb[dss].name);
       return (-1);

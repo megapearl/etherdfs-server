@@ -66,8 +66,10 @@ void genmsg(char *fname, char *msg) {
 int main(void) {
 
   genmsg("msg\\help.c",
-    "EtherDFS v" PVER " / Copyright (C) " PDATE " Mateusz Viste\r\n"
+    "EtherDFS v" PVER "\r\n"
     "A network drive for DOS, running over raw ethernet\r\n"
+    "Copyright (C) " PDATE " Mateusz Viste (original author)\r\n"
+    "LFN fork (C) 2026 Donald Flissinger <donald@flissinger.com>\r\n"
     "\r\n"
     "Usage: etherdfs SRVMAC rdrv-ldrv [rdrv2-ldrv2 ...] [options]\r\n"
     "       etherdfs /u\r\n"
