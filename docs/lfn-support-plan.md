@@ -433,3 +433,86 @@ Create on the server's exported dir a directory `lfntest/` with at minimum:
 | **3** | codepage/Unicode flags; `71A6h`; bounded-buffer hardening | codepage conversion; `71A6h`; handle-exhaustion; stress | charset, edge-case overflow | **~3–5 d combined** |
 
 Sequencing: land the **server `lfn_name` + create-gap + helper** first (independently testable with a tiny throwaway LFN-opcode test client), then the **client 21h hook skeleton** (chain-everything, no service) to validate the gate/DS-patch/unload in isolation, then wire FIND/OPEN, then run Phase 1 with **DOSLFN unloaded**, only then introduce DOSLFN coexistence in Phase 2. Per repo convention, commit+push after each working increment, build via `scripts/builddocker.sh` for the server, and keep `PROTOVER=2` untouched throughout.
+
+---
+
+## 9. Resolved Decisions & Verified API Facts (supersedes §7 Open Questions)
+
+All RBIL-dependent facts below were re-fetched and cross-checked this session against Ralf Brown's Interrupt List (ctyme.com mirror + fd.lod.bz RBIL61 mirror + delorie djgpp mirror), fysnet.net's "Programming Long File Names in DOS", and Microsoft Learn (`WIN32_FIND_DATA`, "File Times"). Confidence is **high** for every Verified item (the §7 `nooit gokken`/`find_data_struct` caveat 8 is now discharged). Per the project rule, repo-doc facts are the source of truth; this section updates §3/§4 accordingly.
+
+### 9.1 Decisions table (Q1..Q9)
+
+| Q | Topic | Status | Resolution |
+|---|---|---|---|
+| **Q1** | 318-byte FindData layout + `7143h` conventions | **Verified** | Confirmed `0x13E` (318) total: long name `cFileName[260]`@`0x2C`, alt `cAlternateFileName[14]`@`0x130`, three 8-byte FILETIME slots@`0x04/0x0C/0x14`. `714Eh` `SI` selects time form (0=64-bit FILETIME, 1=DOS-packed in low DWORD). `7143h` is **packed-DOS in registers** (DI=date, CX=time, SI=hundredths), *not* FILETIME — and the canonical BL action numbering is `03h`=set-write / `04h`=get-write / `05h`=set-access / `06h`=get-access / `07h`=set-create / `08h`=get-create. |
+| **Q2** | Codepage on the wire | **Decided** | Phase 1/2 = **byte-passthrough**, zero server charset conversion (export is 99.998% pure ASCII; the 79 non-ASCII names are all valid UTF-8). Real codepage handling deferred to Phase 3: convert UTF-8(disk)↔CP437(wire, DOS retro default) and set the `71A0h` Unicode flag accordingly; DOS-side create converts OEM→UTF-8 so the disk stays UTF-8-clean. |
+| **Q3** | FILETIME conversion | **Decided** | **Server-side.** Server sends a 64-bit FILETIME *and* keeps the DOS-packed u32; the TSR does no date math — it copies whichever form `SI` requests into the FindData slot. |
+| **Q4** | LFN CWD / `7147h` | **Decided** | **Client-side store.** TSR keeps a per-drive long CWD (the DOS CDS can't hold long paths; server stays stateless). `7147h` answered locally; `713Bh` round-trips to the server to validate. |
+| **Q5** | `716Ch` CX "action taken" clobber | **Verified** | The PUSH CX/POP CX clobber is a **redirector-path-only** DOS 5.0/6.2 bug. Because our TSR front-ends INT 21h **directly** (upstream of the kernel's INT 2Fh AX=11xx wrapper), it is **NOT** subject to the clobber — we control CX on return and return 1/2/3 intact. Still verify on real DOS/FreeDOS. |
+| **Q6** | `AL_LFN_VOLINFO` server round-trip | **Decided** | **No server round-trip.** The capability answer is static for a mounted etherdfs drive; the client answers `71A0h` purely locally. `AL_LFN_VOLINFO` (0x4E) is retained only as an optional diagnostic/fallback, not on the hot path. |
+| **Q7** | Busy-reentry policy | **Decided** | On re-entry while `lfn_busy` is set, **return CF set, `AX=05h` (access denied)** — do *not* chain (would let DOSLFN answer a name on *our* drive) and do *not* spin (DOS non-reentrant). Failing safe cannot corrupt in-flight find/cursor state; a transient `05h` is benign and rare given the `AH==71h`-first cheap gate. |
+| **Q8** | Frame size for 260+260 rename | **Decided** | **No widening needed.** Two `LFNSTR`s (2×(2+260)=524 B) + headers fit the ~1030-byte payload ceiling (`FRAMESIZE-60`) with ~500 B slack. `FRAMESIZE`/size-field stays untouched in Phase 1/2; revisit only if a future op needs >1030. |
+| **Q9** | `7160h` truename CL coverage | **Decided** | Implement **CL=01h (long→short 8.3)** and **CL=02h (short→long)** — the per-drive translation primitives the redirector must provide. Also implement **CL=00h (TRUENAME canonicalize)**: it is cheap (the server already canonicalizes via `resolve_path`) and `COMMAND.COM`/tools rely on it; honor `CH=00h/80h` SUBST semantics. |
+
+### 9.2 Verified API facts
+
+#### 9.2.1 `714Eh`/`714Fh` FindData block — confirmed `0x13E` (318 bytes)
+
+`SI` on entry to **both** `714Eh` and `714Fh` selects the time form: **`SI=0000h` ⇒ 64-bit FILETIME** (100-ns intervals since 1601-01-01 UTC, the native `WIN32_FIND_DATA` form); **`SI=0001h` ⇒ MS-DOS packed date/time** placed in the **low DWORD** of each 8-byte slot (DOS date in high word, DOS time in low word). Return: CF clear ⇒ `AX`=find handle (the `BX` search handle for later `714Fh`/`71A1h`); `CX`=Unicode-conversion flags (**bit0**=long name had unconvertible chars replaced by `_`; **bit1**=short name had `_` substitutions). CF set ⇒ `AX`=DOS error (`7100h`=LFN API unsupported; else `02h/03h/12h`).
+
+| Offset | Size | Field |
+|---|---|---|
+| `0x00` | 4 (DWORD) | `dwFileAttributes` |
+| `0x04` | 8 (FILETIME) | `ftCreationTime` |
+| `0x0C` | 8 (FILETIME) | `ftLastAccessTime` |
+| `0x14` | 8 (FILETIME) | `ftLastWriteTime` |
+| `0x1C` | 4 (DWORD) | `nFileSizeHigh` |
+| `0x20` | 4 (DWORD) | `nFileSizeLow` |
+| `0x24` | 4 (DWORD) | `dwReserved0` |
+| `0x28` | 4 (DWORD) | `dwReserved1` |
+| `0x2C` | 260 (ASCIZ) | `cFileName[260]` (long name) |
+| `0x130` | 14 (ASCIZ) | `cAlternateFileName[14]` (8.3 alias) |
+| **total** | **`0x13E` (318)** | |
+
+Sources: ctyme.com `rb-3203` (INT 21h AX=714Eh); fd.lod.bz RBIL61 `21714e`; fysnet.net `longfile.htm` (FDRec); MS Learn `WIN32_FIND_DATA`. Confidence: high.
+
+#### 9.2.2 `7143h` — packed-DOS dates in registers (NOT FILETIME)
+
+`AX=7143h`, `DS:DX`→ASCIZ name, `BL`=action. Dates/times are **legacy packed-DOS in registers**, identical to `AH=57h`/`4301h` — **never** FILETIME: `DI`=packed DOS DATE (bits15-9=year-1980, 8-5=month, 4-0=day), `CX`=packed DOS TIME (bits15-11=hours, 10-5=min, 4-0=sec/2), `SI`=hundredths (0-199) for creation. `CX` is also reused as the attribute bitmask (BL=00h/01h); `DX:AX` returns compressed physical size (BL=02h). Canonical BL numbering (RBIL delorie id/14/32): `00h` get-attr, `01h` set-attr, `02h` get-physical-size, **`03h` set-write, `04h` get-write, `05h` set-access (date only), `06h` get-access (date only), `07h` set-create, `08h` get-create**. CF set ⇒ `AX`=error (`7100h`=unsupported).
+
+> **Doc correction to §3.4 `AL_LFN_GETATTR`/`SETATTR`:** §3.4 listed GET actions `00/02/04/06/08` and SET `01/03/05/07` with `04`=get-write/`06`=get-access/`08`=get-create — this matches RBIL and is **correct**; keep it. The contrast with `714Eh` (FILETIME-in-struct) stated at §3.4/§6 Phase 2 test 5 stands. Sources: delorie `id/14/32` (RBIL 217143); fd.lod.bz `2143`/`2171`; fysnet `longfile.htm`. Confidence: high.
+
+#### 9.2.3 `71A0h` GET VOLUME INFORMATION — flags we will set
+
+Return (CF clear): `BX`=FS flags — we set **bit14=1** (supports DOS LFN functions), **bit1=1** (preserves case in directory entries); **bit0=0** (not case-sensitive), **bit2=0** (no Unicode on the wire, Phase 1/2). `CX`=**255** (max filename-component length), `DX`=**260** (max path length), `ES:DI`→ASCIZ FS name string (we emit `"EDF5"`). `AX` is destroyed on success. Sources: ctyme RBIL INT 21h AX=71A0h; fysnet `longfile.htm`. Confidence: high.
+
+#### 9.2.4 `716Ch` EXTENDED OPEN/CREATE — action-code semantics + CX-clobber verdict
+
+LFN extension of `6C00h`. Input: `BX`=open mode + sharing/inheritance/flags (bits0-2 access, 4-6 sharing, 7 inherit, 13 return-error-vs-INT24h, 14 write-through — these documented bits are stored in the SFT); `CX`=attributes **used only on create** (bit0 RO, bit1 hidden, bit2 system, bit3 vol-label, bit5 archive); `DX`=action code (low nibble = if-exists: 0=fail, 1=open, 2=truncate/replace; high nibble = if-not-exists: 0=fail, 1=create); **`DS:SI`→ASCIZ long name** (the LFN call takes the name via `DS:SI`, not `DS:DX`). Return (CF clear): `AX`=handle; **`CX`=action taken: 1=opened, 2=created, 3=replaced/truncated.**
+
+**CX-clobber verdict (resolves Q5):** the RBIL DOS 5.0/6.2 bug — "CX does not return the status, returned unchanged because DOS does PUSH CX/POP CX when calling the redirector" — is **scoped strictly to the INT 2Fh AX=11xx redirector dispatch path**. A TSR that hooks **INT 21h directly** (as ours does) answers *upstream* of that PUSH/POP wrapper and is therefore **NOT bitten**: we set and return `CX`=1/2/3 ourselves and the app sees it intact. (The bug would only bite us if we served `716Ch` via the 2Fh callback, which we explicitly do not.) Verify empirically on real DOS/FreeDOS during Phase 1. Sources: fd.lod.bz RBIL61 `216c00` (BUG note); ctyme/fysnet. Confidence: high.
+
+> **Doc correction to §3.4 `AL_LFN_OPEN`/`AL_LFN_CREATE`:** the long name reaches the redirector via **`DS:SI`** for `716Ch` (not `DS:DX`); update §4.5's name-source note to read `DS:SI` for the open/create subfunction specifically (find/attr/rename use `DS:DX`/`DS:SI` per their own RBIL entries — find/delete/rename = `DS:DX`, truename/chdir-family = `DS:SI`). The `[4]=DL action code` field in the §3.4 request is misnamed: the action code rides **`DX`** (a word), not `DL`; carry the full `DX` word on the wire.
+
+#### 9.2.5 `7160h` truename — CL meanings
+
+`DS:SI`→ASCIZ input, `ES:DI`→output buffer. **CL=00h** GET CANONICALIZED name (TRUENAME; 261-byte out; `CH=00h`=true path for SUBSTed drive, `CH=80h`=the SUBSTed letter). **CL=01h** GET SHORT 8.3 name (67-byte out, full path, all uppercase). **CL=02h** GET CANONICAL LONG name (261-byte out, may include lowercase). Per Q9 we implement all three. Sources: ctyme `rb-3208` (CL=02h); fd.lod.bz `217160cl00`/`cl01`. Confidence: high.
+
+> **Cross-check, no doc change:** `7156h` rename (`DS:DX`=old, `ES:DI`=new) is **not across disks** — RBIL does not define a specific `0x11` for the LFN call, so our cross-drive guard returns `0x11` (not-same-device) **client-side** as a self-imposed convention (already noted in §1.3/§3.4). `7141h` delete: `DS:DX`, `SI`=wildcard flag (0=exact, 1=wildcards), `CX`=CL search/CH must-match attrs. `7139h`/`713Ah`/`713Bh` take the path via **`DS:DX`** (not `DS:SI`); `7147h` GETCWD: `DL`=drive (00h=default), `DS:SI`=buffer, returned WITHOUT drive/colon/leading backslash. §3.4 already has the `7147h` `DS:SI`/no-prefix detail correct.
+
+### 9.3 Layout deltas vs §3/§4
+
+- **§3.4 `AL_LFN_FINDFIRST`/`FINDNEXT` response — append 8-byte FILETIME (Q3).** Keep the existing **first 24 bytes = legacy FINDFIRST layout** (`[0]` attr, `[1..11]` SFN, `[12..15]` DOS-packed `ftime` u32, `[16..19]` fsize, `[20..23]` cursor, `[24]` reserved) **unchanged**. After `[24]`, insert an **8-byte FILETIME** field, *then* the existing `u16 Ln + long-name`. New response body becomes:
+  `[0]attr · [1..11]SFN · [12..15]DOS-packed ftime u32 · [16..19]fsize · [20..21]dirss · [22..23]fpos · [24]reserved · [25..32] ftLastWriteTime FILETIME (8B) · [33..34]u16 Ln · [35..]long name`.
+  The server fills the FILETIME from full-precision `st_mtim` (trivial 64-bit math, server-side); the client copies the DOS-packed u32 *or* the FILETIME into each FindData time slot per the requested `SI`, doing **no date math** in the TSR. (Creation/access times: Phase 1/2 the server may replicate the write-FILETIME into all three slots, or send three FILETIMEs — implementer's choice; one FILETIME is the minimum.) Cost is free because the opcode is new. Update §4.3 step "convert DOS packed → FILETIME on the client" to read **"copy the server-supplied FILETIME (SI=0) or the DOS-packed u32 (SI=1) directly; no client-side date conversion"** — the hand-rolled date↔FILETIME routine in §4.6 is **dropped**.
+- **§3.4 `AL_LFN_GETCWD` (0x4C) — served client-side (Q4).** `7147h` is answered from the TSR's **per-drive long-CWD store** (`lfn_cwd[]` in §4.2, now mandatory, not "optional"); the server op is fallback only. `713Bh CHDIR` still **round-trips** `AL_LFN_CHDIR` to the server to validate the directory exists; on success the TSR updates its local long-CWD slot. Update §4.2 to make `lfn_cwd` a committed resident structure and remove the "optional" qualifier; update §3.4's `AL_LFN_GETCWD` note from "mostly locally / Open Question Q4" to "locally; server op is fallback."
+- **§3.4 `AL_LFN_OPEN`/`CREATE` register fix.** Rename the request `[4]` field from "DL action code" to "**DX action code (word, low byte)**" and source the long name from caller **`DS:SI`** (see §9.2.4); update §4.5 accordingly for this subfunction.
+- **§3.2 / §4.1 — `7160h CL=00h` now in scope (Q9):** the `AL_LFN_TRUENAME` (0x4D) request `[0]=CL` must accept `00h` in addition to `01h`/`02h`; the server answers `00h` via `resolve_path` canonicalization honoring `CH` SUBST.
+
+### 9.4 Residual risks introduced by these resolutions
+
+- **Client-side LFN-CWD divergence (Q4):** the TSR's per-drive long CWD can drift from server reality if the directory is renamed/deleted by another client between a `713Bh` validate and a later `7147h` read (server is stateless). Mitigation: `713Bh` always re-validates against the server; treat a subsequent op's path-not-found as authoritative and let the app's error surface. Adds ≈26×(path) bytes to the already-tight `DATASEGSZ` budget — fold into the §7 TSR-memory risk and measure.
+- **Server FILETIME/DOS-packed dual-emit (Q3):** server now computes two time encodings; a mismatch (e.g. TZ/DST handling of `st_mtim`→DOS-packed vs →FILETIME) could make `DIR` (SI=1) and a FILETIME consumer (SI=0) disagree by an offset. Mitigation: derive both from the same UTC `st_mtim` with one shared conversion path; add a Phase 1 test asserting the two forms denote the same instant.
+- **Static `71A0h` answer (Q6):** answering volinfo without ever consulting the server means a drive that is mounted client-side but unreachable still advertises LFN; first real `714Eh`/`716Ch` then fails with a timeout rather than a clean "no LFN." Acceptable (matches existing 8.3 timeout behavior) but note it in the unreachable-server test.
+- **Busy-reentry `05h` (Q7):** returning access-denied on a genuine (rare) reentrant LFN call could make an app spuriously report a file error mid-enumeration. Low likelihood given the cheap `AH==71h` gate and ~100 ms `sendquery` window; if observed in stress testing, revisit toward a short bounded retry rather than chaining.
+- **`CL=00h` truename (Q9):** TRUENAME canonicalization on long paths must not silently 8.3-squeeze components; reuse the same untruncated `resolve_path` discipline as the create-gap fix, or it reintroduces the `FILE_ID_1.DIZ`-class corruption on the canonical-name path.
