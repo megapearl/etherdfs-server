@@ -1091,6 +1091,39 @@ void __interrupt __far inthandler(union INTPACK r) {
 }
 
 
+/* This function is hooked on INT 21h to provide native long-filename support
+ * (INT 21h / AX=71xxh) for our own drive(s), so that DOSLFN no longer needs to
+ * (and stops mangling) those drives. It is RESIDENT (defined before
+ * begtextend) and carries its own DS-patch signature ("MV21"), exactly like
+ * inthandler() above.
+ *
+ * Phase-2 increment 1: the hook services NOTHING yet -- every INT 21h call
+ * (LFN or not) is chained to the previous handler, so DOS behaves exactly as
+ * before. This proves the hook + DS self-patch + install + unload plumbing in
+ * isolation. The AH==71h branch is where the next increment will advertise LFN
+ * (71A0h) and service FindFirst/Next/Open/Create for our drives. */
+void __interrupt __far inthandler21(union INTPACK r) {
+  _asm {
+    jmp SKIPTSRSIG21
+    TSRSIG21 DB 'M','V','2','1'
+    SKIPTSRSIG21:
+    /* save AX, switch to the patched (resident) DS, restore AX */
+    push ax
+    mov ax, 0 /* 0 is patched to the resident DS segment by updatetsrds() */
+    mov ds, ax
+    pop ax
+  }
+  /* The INTPACK 'r' lives on the (SS-relative) stack frame, so reading it is
+   * unaffected by the DS switch above. */
+  if (r.h.ah == 0x71) {
+    /* increment 2: service LFN subfunctions for our drive(s) here */
+    ;
+  }
+  /* chain everything (for now, including 71h) to the previous handler */
+  _mvchain_intr(MK_FP(glob_data.prev_21_handler_seg, glob_data.prev_21_handler_off));
+}
+
+
 /*********************** HERE ENDS THE RESIDENT PART ***********************/
 
 #pragma code_seg("_TEXT", "CODE");
@@ -1548,6 +1581,20 @@ static int updatetsrds(void) {
     unsigned short far *VGA = (unsigned short far *)(0xB8000000l);
     for (x = 0; x < 128; x++) VGA[80*20 + ((x >> 6) * 80) + (x & 63)] = 0x1f00 | ptr[x];
   }*/
+  /* finally patch the INT 21h LFN handler (inthandler21). Instead of a
+   * hardcoded offset (which shifts with optimization), SCAN the first bytes of
+   * the routine for its "MV21" signature; the 'mov ax,IMM16' DS immediate sits
+   * 6 bytes past the signature start (same layout as inthandler). */
+  {
+    unsigned short i;
+    ptr = (unsigned char far *)inthandler21;
+    for (i = 0; i < 96; i++) {
+      if ((ptr[i] == 'M') && (ptr[i + 1] == 'V') && (ptr[i + 2] == '2') && (ptr[i + 3] == '1')) break;
+    }
+    if (i >= 96) return(-1); /* signature not found */
+    sptr = (unsigned short far *)(ptr + i);
+    sptr[3] = newds;
+  }
   return(0);
 }
 
@@ -1678,6 +1725,33 @@ int main(int argc, char **argv) {
       #include "msg\\othertsr.c";
       return(1);
     }
+    /* also confirm we are still the top of the INT 21h chain (signature
+     * "MV21"). If another TSR hooked INT 21h after us, unloading would leave a
+     * dangling hook in freed memory -> refuse the whole unload. */
+    {
+      unsigned short s21 = 0, o21 = 0, k; /* s21/o21 init: assigned via asm */
+      unsigned char far *int21fptr;
+      _asm {
+        push ax
+        push bx
+        push es
+        mov ax, 3521h /* AH=GetVect AL=21 */
+        int 21h
+        mov s21, es
+        mov o21, bx
+        pop es
+        pop bx
+        pop ax
+      }
+      int21fptr = (unsigned char far *)MK_FP(s21, o21);
+      for (k = 0; k < 96; k++) {
+        if ((int21fptr[k] == 'M') && (int21fptr[k + 1] == 'V') && (int21fptr[k + 2] == '2') && (int21fptr[k + 3] == '1')) break;
+      }
+      if (k >= 96) {
+        outmsg("EtherDFS cannot be unloaded: another TSR hooked INT 21h after it.\r\n$");
+        return(1);
+      }
+    }
     /* get the ptr to TSR's data */
     _asm {
       push ax
@@ -1723,6 +1797,24 @@ int main(int argc, char **argv) {
       mov ax, 252Fh
       int 21h
       /* restore AX, DS and DX */
+      pop dx
+      pop ds
+      pop ax
+    }
+    /* restore the previous INT 21h handler too (we confirmed above that we are
+     * still the top of the 21h chain, so this cannot unlink a foreign hook) */
+    myseg = tsrdata->prev_21_handler_seg;
+    myoff = tsrdata->prev_21_handler_off;
+    _asm {
+      push ax
+      push ds
+      push dx
+      mov ax, myseg
+      push ax
+      pop ds
+      mov dx, myoff
+      mov ax, 2521h /* AH=SetVect AL=21 */
+      int 21h
       pop dx
       pop ds
       pop ax
@@ -1794,6 +1886,27 @@ int main(int argc, char **argv) {
     mov word ptr [glob_data + GLOB_DATOFF_PREV2FHANDLEROFF], bx
     pop bx
     pop es
+  }
+
+  /* remember the current INT 21h handler too (the LFN hook will chain to it;
+   * if DOSLFN is loaded, this is DOSLFN's handler, so it stays behind us for
+   * non-our-drive calls). Stored via C since prev_21_* sits past the ASM
+   * GLOB_DATOFF_* offsets. */
+  {
+    unsigned short s21 = 0, o21 = 0; /* init: assigned via asm, which Watcom's
+                                      * flow analysis does not see (avoids W200) */
+    _asm {
+      mov ax, 3521h /* AH=GetVect AL=21 */
+      push es
+      push bx
+      int 21h
+      mov s21, es
+      mov o21, bx
+      pop bx
+      pop es
+    }
+    glob_data.prev_21_handler_seg = s21;
+    glob_data.prev_21_handler_off = o21;
   }
 
   /* is the TSR installed already? */
@@ -1988,6 +2101,24 @@ int main(int argc, char **argv) {
     mov dx, offset inthandler /* int handler's offset */
     int 21h
     pop dx /* restore DS and DX to previous values */
+    pop ds
+    sti
+  }
+
+  /* also hook INT 21h, for native LFN. Done here, last, because: (a)
+   * updatetsrds() has already patched inthandler21's DS, and (b) it minimises
+   * the window in which our own init code runs through the new hook (only the
+   * AH=31h keep below does, and that just chains). */
+  _asm {
+    cli
+    mov ax, 2521h /* AH=set interrupt vector  AL=21 */
+    push ds
+    push dx
+    push cs
+    pop ds
+    mov dx, offset inthandler21
+    int 21h
+    pop dx
     pop ds
     sti
   }

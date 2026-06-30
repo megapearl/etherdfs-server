@@ -44,6 +44,13 @@ static struct tsrshareddata {
 /*  8 */ unsigned char pktint;     /* software interrupt of the packet driver */
 
          unsigned char ldrv[26]; /* local to remote drives mappings (0=A:, 1=B, etc */
+
+         /* seg:off of the previous INT 21h handler (the LFN hook chains to it
+          * for everything that is not an LFN call on one of our drives). Added
+          * at the END of the struct so the GLOB_DATOFF_* assembly offsets above
+          * are unchanged; these fields are only ever accessed from C. */
+         unsigned short prev_21_handler_seg;
+         unsigned short prev_21_handler_off;
 } glob_data;
 
 /* global variables related to packet driver management and handling frames */
