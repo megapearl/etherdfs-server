@@ -8,7 +8,8 @@
 struct fileprops {
   char fcbname[12]; /* FCB-style file name (FILE0001TXT) */
   unsigned long fsize;
-  unsigned long ftime;
+  unsigned long ftime;         /* DOS-packed date+time (legacy/8.3 wire) */
+  unsigned long long filetime; /* Win FILETIME (100ns since 1601) for LFN ops */
   unsigned char fattr;
 };
 
@@ -55,7 +56,14 @@ int setitemattr(char *i, unsigned char fattr);
  * otherwise. */
 int findfile(struct fileprops *f, unsigned short dss, char *fcbtmpl,
              unsigned char attr, unsigned short *nth, int flags,
-             const char *vollabel);
+             const char *vollabel, char *out_lfn);
+
+/* computes the deterministic 8.3 SFN alias that target_lfn has (or would get)
+ * inside dir_path, matching exactly what gendirlist()/resolve_sfn_in_dir()
+ * assign (same sort + lfn2sfn + sequential ~N). Writes it (e.g. "FILE_I~1.DIZ")
+ * into out_sfn. Falls back to plain lfn2sfn() if dir_path cannot be scanned. */
+void sfn_for_name_in_dir(const char *dir_path, const char *target_lfn,
+                         char *out_sfn);
 
 /* creates or truncates a file f in directory d with attributes attr. returns 0
  * on success (and f filled), non-zero otherwise. */

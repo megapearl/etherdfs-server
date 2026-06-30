@@ -111,6 +111,15 @@ enum AL_SUBFUNCTIONS {
   AL_SKFMEND = 0x21,
   AL_UNKNOWN_2D = 0x2D,
   AL_SPOPNFIL = 0x2E,
+  /* additive LFN (long filename) opcodes - new namespace at 0x40+, kept
+   * separate from the legacy 8.3 ops; an old server hits the terminal
+   * "else return(-1)" and silently drops them (forward-safe). */
+  AL_LFN_CAPS = 0x40,
+  AL_LFN_FINDFIRST = 0x41,
+  AL_LFN_FINDNEXT = 0x42,
+  AL_LFN_OPEN = 0x43,
+  AL_LFN_CREATE = 0x44,
+  AL_LFN_VOLINFO = 0x4E,
   AL_UNKNOWN = 0xFF
 };
 
@@ -213,9 +222,11 @@ static int isroot(char *root, char *dir) {
 
 /* explode a full X:\DIR\FILE????.??? search path into directory and mask */
 static void explodepath(char *dir, char *file, char *source, int sourcelen) {
-  int i, lastbackslash;
-  /* if drive present, skip it */
-  if (source[1] == ':') {
+  int i, lastbackslash, filelen;
+  if (sourcelen < 0)
+    sourcelen = 0;
+  /* if drive present, skip it (guard the source[1] read for short input) */
+  if ((sourcelen >= 2) && (source[1] == ':')) {
     source += 2;
     sourcelen -= 2;
   }
@@ -226,11 +237,22 @@ static void explodepath(char *dir, char *file, char *source, int sourcelen) {
     if ((source[i] == '\\') || (source[i] == '/'))
       lastbackslash = i;
   }
+  /* empty / slash-less input: produce empty dir+file instead of a negative-
+   * length memcpy (an empty LFNSTR from a crafted request would otherwise drive
+   * the file copy size to -1 -> SIZE_MAX). */
+  if (lastbackslash + 1 > sourcelen) {
+    dir[0] = 0;
+    file[0] = 0;
+    return;
+  }
   memcpy(dir, source, lastbackslash + 1);
   dir[lastbackslash + 1] = 0;
   /* copy file/mask into file */
-  memcpy(file, source + lastbackslash + 1, sourcelen - (lastbackslash + 1));
-  file[sourcelen - (lastbackslash + 1)] = 0;
+  filelen = sourcelen - (lastbackslash + 1);
+  if (filelen < 0)
+    filelen = 0;
+  memcpy(file, source + lastbackslash + 1, filelen);
+  file[filelen] = 0;
 }
 
 /* replaces all rep chars in string s by repby */
@@ -240,6 +262,96 @@ static void charreplace(char *s, char rep, char repby) {
       *s = repby;
     s++;
   }
+}
+
+/* ===== LFN (long filename) helpers ===================================== */
+
+/* Reads an LFNSTR (u16 LE length + <len> raw path bytes, NOT NUL-terminated)
+ * from src, which has srclen bytes available. Copies the path into out (NUL-
+ * terminated) and converts backslashes to forward slashes. Returns 0 on
+ * success, non-zero on a bounds error (declared length runs past the frame, or
+ * would overflow out). This is the bounded replacement for the legacy fixed
+ * dos_*[256] memcpy's, so a >255-char or truncated LFN can never overflow. */
+static int lfnstr_get(unsigned char *src, int srclen, char *out, int outsz) {
+  unsigned int len;
+  if (srclen < 2)
+    return (-1);
+  len = (unsigned int)src[0] | ((unsigned int)src[1] << 8);
+  if ((int)(2 + len) > srclen)
+    return (-1); /* declared length exceeds what's actually in the frame */
+  if ((int)len > outsz - 1)
+    return (-1); /* would overflow the destination buffer */
+  memcpy(out, src + 2, len);
+  out[len] = 0;
+  charreplace(out, '\\', '/');
+  return (0);
+}
+
+/* Fills an LFN FindFirst/FindNext/Open/Create response body into answ, per the
+ * §9.3 layout: [0]attr [1..11]FCB-SFN [12..15]DOS-packed time [16..19]size
+ * [20..21]w20 [22..23]w22 [24]b24 [25..32]FILETIME(LE) [33..34]u16 lfnlen
+ * [35..]long name. (find: w20=dirss,w22=fpos,b24=reserved; open: w20=fileid,
+ * w22=action,b24=openmode.) Returns the payload length. */
+static int lfn_fill_resp(unsigned char *answ, struct fileprops *fp,
+                         unsigned short w20, unsigned short w22,
+                         unsigned char b24, const char *lfn) {
+  int ln = (int)strlen(lfn);
+  int i;
+  unsigned long long ft = fp->filetime;
+  unsigned long t32;
+  /* All multi-byte fields are written byte-wise (little-endian) to avoid
+   * unaligned typed stores: answ = frame+60, so answ+33 is an odd address. */
+  answ[0] = fp->fattr;
+  memcpy(answ + 1, fp->fcbname, 11);
+  t32 = fp->ftime; /* [12..15] DOS-packed date+time */
+  answ[12] = t32 & 0xff;
+  answ[13] = (t32 >> 8) & 0xff;
+  answ[14] = (t32 >> 16) & 0xff;
+  answ[15] = (t32 >> 24) & 0xff;
+  t32 = fp->fsize; /* [16..19] size */
+  answ[16] = t32 & 0xff;
+  answ[17] = (t32 >> 8) & 0xff;
+  answ[18] = (t32 >> 16) & 0xff;
+  answ[19] = (t32 >> 24) & 0xff;
+  answ[20] = w20 & 0xff; /* [20..21] dirss / fileid */
+  answ[21] = (w20 >> 8) & 0xff;
+  answ[22] = w22 & 0xff; /* [22..23] fpos / action */
+  answ[23] = (w22 >> 8) & 0xff;
+  answ[24] = b24; /* [24] reserved / open-mode */
+  for (i = 0; i < 8; i++) { /* [25..32] FILETIME, little-endian */
+    answ[25 + i] = (unsigned char)(ft & 0xff);
+    ft >>= 8;
+  }
+  if (ln > 255)
+    ln = 255;
+  answ[33] = ln & 0xff; /* [33..34] long-name length */
+  answ[34] = (ln >> 8) & 0xff;
+  memcpy(answ + 35, lfn, (size_t)ln); /* [35..] long name */
+  return (35 + ln);
+}
+
+/* Given a resolved full Linux path, sets fp->fcbname to the deterministic 8.3
+ * SFN alias of its leaf (matching what FindFirst would report) and returns a
+ * pointer to the real (long) leaf within fullpath. */
+static const char *lfn_alias_from_path(struct fileprops *fp, char *fullpath) {
+  char parent[512];
+  char sfn[14];
+  char *base = fullpath;
+  char *p;
+  size_t plen;
+  for (p = fullpath; *p != 0; p++)
+    if (*p == '/')
+      base = p + 1;
+  plen = (size_t)(base - fullpath);
+  if (plen >= sizeof(parent))
+    plen = sizeof(parent) - 1;
+  memcpy(parent, fullpath, plen);
+  if (plen > 1 && parent[plen - 1] == '/') /* drop trailing slash for opendir */
+    plen--;
+  parent[plen] = 0;
+  sfn_for_name_in_dir(parent[0] != 0 ? parent : "/", base, sfn);
+  filename2fcb(fp->fcbname, sfn);
+  return (base);
 }
 
 static int process(struct struct_answcache *answer, unsigned char *reqbuff,
@@ -401,8 +513,9 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
     if (drivesfat[reqdrv] != 0)
       flags |= FFILE_ISFAT;
     dirss = getitemss(directory);
-    if ((dirss == 0xffffu) || (findfile(&fprops, dirss, filemaskfcb, fattr,
-                                        &fpos, flags, custom_vol_label) != 0)) {
+    if ((dirss == 0xffffu) ||
+        (findfile(&fprops, dirss, filemaskfcb, fattr, &fpos, flags,
+                  custom_vol_label, NULL) != 0)) {
       DBG("No matching file found\n");
       *ax = 0x12; /* 0x12 is "no more files" -- one would assume 0x02 "file not
                      found" would be better, but that's not what MS-DOS 5.x
@@ -446,8 +559,8 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
       flags |= FFILE_ISROOT;
     if (drivesfat[reqdrv] != 0)
       flags |= FFILE_ISFAT;
-    if (findfile(&fprops, dirss, fcbmask, fattr, &fpos, flags,
-                 custom_vol_label)) {
+    if (findfile(&fprops, dirss, fcbmask, fattr, &fpos, flags, custom_vol_label,
+                 NULL)) {
       DBG("No more matching files found\n");
       *ax = 0x12; /* "no more files" */
     } else {      /* found a file */
@@ -852,6 +965,132 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
       DBG("new offset: %d\n", offs);
       ((uint32_t *)answ)[0] = htole32(offs);
       reslen = 4;
+    }
+  } else if (query == AL_LFN_CAPS) { /* 0x40 - LFN capability probe */
+    DBG("LFN_CAPS\n");
+    answ[0] = 1;    /* LFN sub-version (start at 1) */
+    answ[1] = 0;    /* reserved */
+    answ[2] = 0x07; /* feature bitmap LE: bit0 find, bit1 open/create, bit2 volinfo */
+    answ[3] = 0x00;
+    reslen = 4;
+  } else if (query == AL_LFN_VOLINFO) { /* 0x4E - GET VOLUME INFO (fallback) */
+    DBG("LFN_VOLINFO\n");
+    /* byte-wise, all 11 bytes set explicitly (no stale frame data in gaps):
+     * [0..1] BX flags LE, [2..3] CX LE, [4..5] DX LE, [6..10] FS-name */
+    answ[0] = 0x02; /* BX = 0x4002 LE: bit1 case-preserved | bit14 supports LFN */
+    answ[1] = 0x40;
+    answ[2] = 0xFF; /* CX = 255 (max filename-component length) */
+    answ[3] = 0x00;
+    answ[4] = 0x04; /* DX = 260 (max path length) */
+    answ[5] = 0x01;
+    memcpy(answ + 6, "EDF5", 5); /* [6..10] filesystem name string */
+    reslen = 11;
+  } else if ((query == AL_LFN_FINDFIRST) && (reqbufflen >= 3)) { /* 0x41 */
+    unsigned char fattr = reqbuff[0];
+    char dlfn[260], dirpart[512], leafmask[260], filemaskfcb[12], resolved[512];
+    char foundlfn[256];
+    struct fileprops fprops;
+    unsigned short dirss, fpos = 0;
+    int flags;
+    if (lfnstr_get(reqbuff + 1, reqbufflen - 1, dlfn, sizeof(dlfn)) != 0) {
+      *ax = 2;
+    } else {
+      explodepath(dirpart, leafmask, dlfn, (int)strlen(dlfn));
+      resolve_path(resolved, root, dirpart);
+      filename2fcb(filemaskfcb, leafmask);
+      DBG("LFN_FINDFIRST in '%s' mask '%s'\n", resolved, leafmask);
+      flags = 0;
+      if (isroot(root, resolved) != 0)
+        flags |= FFILE_ISROOT;
+      if (drivesfat[reqdrv] != 0)
+        flags |= FFILE_ISFAT;
+      dirss = getitemss(resolved);
+      if ((dirss == 0xffffu) ||
+          (findfile(&fprops, dirss, filemaskfcb, fattr, &fpos, flags,
+                    custom_vol_label, foundlfn) != 0)) {
+        *ax = 0x12; /* no more files */
+      } else {
+        reslen = lfn_fill_resp(answ, &fprops, dirss, fpos, 0, foundlfn);
+      }
+    }
+  } else if ((query == AL_LFN_FINDNEXT) && (reqbufflen >= 16)) { /* 0x42 */
+    unsigned char fattr = reqbuff[4];
+    char *fcbmask = (char *)reqbuff + 5;
+    char foundlfn[256];
+    struct fileprops fprops;
+    unsigned short dirss, fpos;
+    int flags;
+    dirss = le16toh(wreqbuff[0]);
+    fpos = le16toh(wreqbuff[1]);
+    DBG("LFN_FINDNEXT nth %u in dir #%u\n", fpos, dirss);
+    flags = 0;
+    if (isroot(root, sstoitem(dirss)) != 0)
+      flags |= FFILE_ISROOT;
+    if (drivesfat[reqdrv] != 0)
+      flags |= FFILE_ISFAT;
+    if (findfile(&fprops, dirss, fcbmask, fattr, &fpos, flags, custom_vol_label,
+                 foundlfn) != 0) {
+      *ax = 0x12;
+    } else {
+      reslen = lfn_fill_resp(answ, &fprops, dirss, fpos, 0, foundlfn);
+    }
+  } else if ((query == AL_LFN_CREATE) && (reqbufflen >= 4)) { /* 0x44 */
+    if (readonly_mode) {
+      *ax = 5;
+    } else {
+      unsigned char cattr = reqbuff[0]; /* creation attributes (low byte) */
+      char dlfn[260], dirpart[512], leaf[260], resolved[512], fullpath[1024];
+      struct fileprops fprops;
+      if (lfnstr_get(reqbuff + 2, reqbufflen - 2, dlfn, sizeof(dlfn)) != 0) {
+        *ax = 2;
+      } else if (dlfn[0] == 0) {
+        *ax = 3; /* empty path -> nothing to create */
+      } else {
+        explodepath(dirpart, leaf, dlfn, (int)strlen(dlfn));
+        resolve_path(resolved, root, dirpart);
+        DBG("LFN_CREATE '%s' in '%s'\n", leaf, resolved);
+        if (changedir(resolved) != 0) {
+          *ax = 3; /* path not found */
+        } else if (createfile(&fprops, resolved, leaf, cattr,
+                              drivesfat[reqdrv]) != 0) {
+          *ax = 2;
+        } else {
+          unsigned short fileid;
+          const char *realleaf;
+          snprintf(fullpath, sizeof(fullpath), "%s/%s", resolved, leaf);
+          realleaf = lfn_alias_from_path(&fprops, fullpath);
+          fileid = getitemss(fullpath);
+          if (fileid == 0xffffu) {
+            *ax = 2;
+          } else {
+            reslen = lfn_fill_resp(answ, &fprops, fileid, 2 /*created*/,
+                                   2 /*rw*/, realleaf);
+          }
+        }
+      }
+    }
+  } else if ((query == AL_LFN_OPEN) && (reqbufflen >= 3)) { /* 0x43 */
+    char dlfn[260], resolved[512];
+    struct fileprops fprops;
+    int attr;
+    if (lfnstr_get(reqbuff + 1, reqbufflen - 1, dlfn, sizeof(dlfn)) != 0) {
+      *ax = 2;
+    } else {
+      resolve_path(resolved, root, dlfn);
+      DBG("LFN_OPEN '%s'\n", resolved);
+      attr = getitemattr(resolved, &fprops, drivesfat[reqdrv]);
+      if ((attr == 0xff) || ((attr & (FAT_VOL | FAT_DIR)) != 0)) {
+        *ax = 2;
+      } else {
+        unsigned short fileid = getitemss(resolved);
+        const char *realleaf = lfn_alias_from_path(&fprops, resolved);
+        if (fileid == 0xffffu) {
+          *ax = 2;
+        } else {
+          reslen = lfn_fill_resp(answ, &fprops, fileid, 1 /*opened*/, 2 /*rw*/,
+                                 realleaf);
+        }
+      }
     }
   } else { /* unknown query - ignore */
     return (-1);
