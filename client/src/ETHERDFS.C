@@ -1142,17 +1142,47 @@ void __interrupt __far inthandler21(union INTPACK r) {
     }
   }
   if (r.w.ax == 0x7303) { /* Win95 GET EXTENDED FREE SPACE (FAT32) */
-    /* DS:DX -> ASCIZ drive root ("E:\"). For our drive, force "unsupported" so
-     * the caller (4DOS on PC DOS 7.x, which tries this before AH=36h) falls back
-     * to AH=36h, which we answer above. */
+    /* DS:DX -> ASCIZ drive root ("E:\"); ES:DI -> caller buffer (ExtGetDskFre-
+     * SpcStruc, 44 bytes); CX = buffer length. Both 4DOS's QueryDiskInfo AND
+     * COMMAND.COM (PC DOS 7.x, FAT32-aware) use 7303h for the DIR free-space
+     * footer. If we just chain it, DOS answers locally for our PHYSICAL drive
+     * and it fails; if we force it "unsupported", COMMAND.COM shows no footer at
+     * all. So we FILL the struct with the same values we report for AH=36h. The
+     * field layout matches 4DOS's FAT32 struct (4DOS.H) and RBIL:
+     *   00h W size, 02h W version, 04h D sec/clus, 08h D bytes/sec,
+     *   0Ch D avail clusters, 10h D total clusters, 14h D avail phys sectors,
+     *   18h D total phys sectors, 1Ch D avail alloc units, 20h D total alloc
+     *   units, 24h..2Bh reserved. */
     unsigned char far *rootpath = MK_FP(r.w.ds, r.w.dx);
     unsigned char drv = 0xff;
     if ((rootpath[0] != 0) && (rootpath[1] == ':'))
       drv = DRIVETONUM(rootpath[0]);
     if ((drv <= 25) && (glob_data.ldrv[drv] != 0xff)) {
-      r.w.ax = 0x7100;      /* unsupported function */
-      r.w.flags |= INTR_CF; /* CF set = error */
-      return;               /* handled here -- do NOT chain */
+      if (r.w.cx >= 0x2c) { /* caller buffer big enough for the full struct */
+        unsigned char far *b = MK_FP(r.w.es, r.w.di);
+        unsigned short far *w = (unsigned short far *)b;
+        unsigned long far *dw;
+        unsigned int k;
+        for (k = 0; k < 0x2c; k++) b[k] = 0;
+        w[0] = 0x2c;              /* 00h structure size */
+        w[1] = 0;                 /* 02h structure version (0) */
+        dw = (unsigned long far *)(b + 4);
+        dw[0] = 1ul;              /* 04h sectors per cluster */
+        dw[1] = 32768ul;          /* 08h bytes per sector */
+        dw[2] = 0xfffful;         /* 0Ch available clusters   (~2 GiB) */
+        dw[3] = 0xfffful;         /* 10h total clusters        (~2 GiB) */
+        dw[4] = 0xfffful;         /* 14h available phys sectors */
+        dw[5] = 0xfffful;         /* 18h total phys sectors */
+        dw[6] = 0xfffful;         /* 1Ch available allocation units */
+        dw[7] = 0xfffful;         /* 20h total allocation units */
+        r.w.ax = 0;               /* success */
+        r.w.flags &= ~INTR_CF;    /* CF clear = OK */
+      } else {
+        /* buffer too small: force "unsupported" so 4DOS falls back to AH=36h */
+        r.w.ax = 0x7100;
+        r.w.flags |= INTR_CF;
+      }
+      return;                     /* handled here -- do NOT chain */
     }
   }
   if (r.h.ah == 0x71) {
