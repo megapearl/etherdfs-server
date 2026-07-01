@@ -372,14 +372,15 @@ static long gendirlist(struct sfsdb *root, unsigned char fatflag,
     return (-1);
   fullpathoffset = sprintf(fullpath, "%s/", root->name);
 
-  /* Inject the synthetic volume label ONLY in the root directory (as upstream
-     ethersrv-linux does). Injecting it into every subdirectory broke DIR under
-     IBM PC DOS: DIR's label-phase FindFirst (search attr 0x08) succeeded in a
-     subdir, and PC-DOS then continued the file phase with a FindNext that still
-     carried attr 0x08 -- which only matches VOL nodes -- so findfile() returned
-     "no more files" and the whole listing came back empty. NC (no label probe)
-     and the more lenient MS-DOS/FreeDOS COMMAND.COM were unaffected. */
-  if (is_root && (root->name[0] != 0 || (vollabel != NULL && vollabel[0] != 0))) {
+  /* Inject the synthetic volume label only in the root directory AND only when
+     an explicit label was configured (opt-in). Rationale: under IBM PC DOS the
+     synthetic VOL makes DIR's label-phase FindFirst (attr 0x08) succeed, after
+     which PC-DOS never issues the file-phase FindFirst and the listing comes
+     back empty (MS-DOS/FreeDOS/NC are unaffected). Making the VOL opt-in lets a
+     label-less mount behave like a real label-less drive, which PC-DOS DIR
+     handles normally. (Previously this also fell back to the directory basename
+     when no label was set, so a VOL was always injected.) */
+  if (is_root && vollabel != NULL && vollabel[0] != 0) {
     char *basename = root->name;
     char *p;
     for (p = root->name; *p != 0; p++) {
