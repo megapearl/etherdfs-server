@@ -1132,8 +1132,15 @@ void __interrupt __far inthandler21(union INTPACK r) {
    * DX=avail) and AH=36h (BX=avail DX=total); since we answer AH=36h *directly*
    * we use the AH=36h convention here. total==avail so the order is moot. */
   if (r.h.ah == 0x36) { /* GET FREE DISK SPACE; DL = drive (0=default,1=A,..) */
-    unsigned char drv = r.h.dl;
-    if ((drv >= 1) && (drv <= 26) && (glob_data.ldrv[drv - 1] != 0xff)) {
+    /* DL=0 means the CURRENT default drive; resolve it from the SDA (offset 16h
+     * = current logical drive, 0=A). COMMAND.COM uses DL=0 for its DIR footer
+     * when the prompt is already ON our drive, so we must handle it too -- else
+     * the footer shows only when DIR is run from another drive (e.g. "dir e:"
+     * from C:). glob_sdaptr is the DOS SDA obtained at install. */
+    unsigned char idx = (r.h.dl == 0)
+                          ? ((unsigned char far *)glob_sdaptr)[0x16]
+                          : (unsigned char)(r.h.dl - 1);
+    if ((idx <= 25) && (glob_data.ldrv[idx] != 0xff)) {
       r.w.ax = 1;      /* sectors per cluster (MS-DOS tolerates only 1 here) */
       r.w.cx = 32768;  /* bytes per sector */
       r.w.bx = 0xffff; /* number of available clusters (~2 GiB, server-capped) */
@@ -1183,6 +1190,39 @@ void __interrupt __far inthandler21(union INTPACK r) {
         r.w.flags |= INTR_CF;
       }
       return;                     /* handled here -- do NOT chain */
+    }
+  }
+  if (r.w.ax == 0x6900) { /* GET DISK SERIAL NUMBER (DOS 4+) */
+    /* BL = drive (0=default,1=A,..); DS:DX -> 25-byte info buffer:
+     *   00h WORD info level, 02h DWORD serial, 06h 11B label, 11h 8B fstype.
+     * DOS has no serial for our (PHYSICAL) redirector drive, so DIR shows no
+     * "Volume Serial Number" line (4DOS and COMMAND.COM print it only when the
+     * serial != 0). We return a stable synthetic serial EDF5-xxxx (high word =
+     * the EtherDFS ethertype 0xEDF5; low word = the last 2 bytes of the server
+     * MAC, so it differs per server). NOTE: shells that skip the serial query
+     * for network drives (4DOS's QueryVolumeInfo does: "if QueryDriveRemote goto
+     * dos_3") never call this -- only COMMAND.COM benefits. */
+    unsigned char idx = (r.h.bl == 0)
+                          ? ((unsigned char far *)glob_sdaptr)[0x16]
+                          : (unsigned char)(r.h.bl - 1);
+    if ((idx <= 25) && (glob_data.ldrv[idx] != 0xff)) {
+      unsigned char far *buf = MK_FP(r.w.ds, r.w.dx);
+      unsigned int k;
+      for (k = 0; k < 25; k++) buf[k] = 0;
+      /* 00h..01h info level = 0 (left zeroed) */
+      buf[2] = GLOB_RMAC[5]; /* 02h serial (DWORD, little-endian): low word = */
+      buf[3] = GLOB_RMAC[4]; /*    server MAC[4..5]; high word = 0xEDF5        */
+      buf[4] = 0xf5;
+      buf[5] = 0xed;
+      for (k = 0; k < 11; k++) buf[6 + k] = ' '; /* 06h label (shells read the */
+      buf[6] = 'R'; buf[7] = 'E'; buf[8] = 'T'; /*    real label via FindFirst) */
+      buf[9] = 'R'; buf[10] = 'O';
+      buf[17] = 'F'; buf[18] = 'A'; buf[19] = 'T'; /* 11h filesystem type */
+      buf[20] = '1'; buf[21] = '6';
+      buf[22] = ' '; buf[23] = ' '; buf[24] = ' ';
+      r.w.ax = 0;            /* success */
+      r.w.flags &= ~INTR_CF; /* CF clear = OK */
+      return;               /* handled here -- do NOT chain */
     }
   }
   if (r.h.ah == 0x71) {

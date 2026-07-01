@@ -16,6 +16,15 @@ fork [2026-07-01]:
    free space) first. The client now fills the 7303h ExtGetDskFreSpcStruc for
    its own drives with the same figures instead of failing it, so COMMAND.COM
    also gets a footer. Non-our drives chain to DOS unchanged.
+ - fix: the footer now also shows under COMMAND.COM when the CURRENT drive is
+   our drive. In that case DIR queries free space with AH=36h/DL=0 (the default
+   drive) rather than an explicit drive number; the client now resolves the
+   current drive from the SDA (offset 16h) and answers DL=0 for its own drives.
+ - feat: report a synthetic volume serial number via INT 21h/AX=6900h, so DIR
+   shows a "Volume Serial Number" line for our drives: EDF5-xxxx (high word =
+   the EtherDFS ethertype 0xEDF5, low word = the last two bytes of the server
+   MAC). Note: 4DOS skips the serial query for network drives, so this surfaces
+   under COMMAND.COM. Non-our drives chain to DOS unchanged.
  - fix(server): synthetic volume label is opt-in (only when a label is set).
  - fix(server): expand '*' wildcard to '?' in filename2fcb (FCB mask
    expansion), fixing "dir e:\" under COMMAND.COM.
