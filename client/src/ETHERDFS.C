@@ -1091,17 +1091,16 @@ void __interrupt __far inthandler(union INTPACK r) {
 }
 
 
-/* This function is hooked on INT 21h to provide native long-filename support
- * (INT 21h / AX=71xxh) for our own drive(s), so that DOSLFN no longer needs to
- * (and stops mangling) those drives. It is RESIDENT (defined before
+/* This function is hooked on INT 21h. It is RESIDENT (defined before
  * begtextend) and carries its own DS-patch signature ("MV21"), exactly like
  * inthandler() above.
  *
- * Phase-2 increment 1: the hook services NOTHING yet -- every INT 21h call
- * (LFN or not) is chained to the previous handler, so DOS behaves exactly as
- * before. This proves the hook + DS self-patch + install + unload plumbing in
- * isolation. The AH==71h branch is where the next increment will advertise LFN
- * (71A0h) and service FindFirst/Next/Open/Create for our drives. */
+ * It currently services the disk-space queries (AH=36h and AX=7303h) for our
+ * own drive(s) -- see the comment on those branches below -- and chains
+ * everything else (including the not-yet-implemented LFN AX=71xxh calls) to the
+ * previous handler. The AH==71h branch is reserved for a future increment that
+ * will advertise LFN (71A0h) and service FindFirst/Next/Open/Create for our
+ * drives so DOSLFN no longer needs to (and stops mangling) those drives. */
 void __interrupt __far inthandler21(union INTPACK r) {
   _asm {
     jmp SKIPTSRSIG21
@@ -1115,6 +1114,47 @@ void __interrupt __far inthandler21(union INTPACK r) {
   }
   /* The INTPACK 'r' lives on the (SS-relative) stack frame, so reading it is
    * unaffected by the DS switch above. */
+
+  /* Answer disk-space queries for our own drive(s) directly, with valid values.
+   * DOS satisfies INT 21h/AH=36h locally for our redirector drive (it carries
+   * the CDS PHYSICAL bit, needed so MS-DOS doesn't ignore the drive) and returns
+   * AX=0xFFFF (invalid drive) instead of routing to us via INT 2Fh/110Ch.
+   * COMMAND.COM ignores that and lists anyway, but 4DOS's DIR calls its
+   * QueryDiskInfo FIRST and treats AX=0xFFFF as a fatal invalid-drive: it does
+   * `continue' and skips the whole listing, showing only the volume label. By
+   * reporting a plain, valid volume here we let 4DOS proceed to the file
+   * enumeration (which we DO serve via INT 2Fh), and both shells get a sane
+   * "bytes free" footer instead of garbage.
+   *
+   * We report using the SAME scheme the server uses for INT 2Fh/110Ch (see
+   * ethersrv.c): sectors-per-cluster = 1 (MS-DOS tolerates only 1), 32768 bytes
+   * per sector, capped at ~2 GiB. NOTE: DOS swaps BX<->DX between 110Ch (BX=total
+   * DX=avail) and AH=36h (BX=avail DX=total); since we answer AH=36h *directly*
+   * we use the AH=36h convention here. total==avail so the order is moot. */
+  if (r.h.ah == 0x36) { /* GET FREE DISK SPACE; DL = drive (0=default,1=A,..) */
+    unsigned char drv = r.h.dl;
+    if ((drv >= 1) && (drv <= 26) && (glob_data.ldrv[drv - 1] != 0xff)) {
+      r.w.ax = 1;      /* sectors per cluster (MS-DOS tolerates only 1 here) */
+      r.w.cx = 32768;  /* bytes per sector */
+      r.w.bx = 0xffff; /* number of available clusters (~2 GiB, server-capped) */
+      r.w.dx = 0xffff; /* total number of clusters      (~2 GiB, server-capped) */
+      return;          /* handled here -- do NOT chain */
+    }
+  }
+  if (r.w.ax == 0x7303) { /* Win95 GET EXTENDED FREE SPACE (FAT32) */
+    /* DS:DX -> ASCIZ drive root ("E:\"). For our drive, force "unsupported" so
+     * the caller (4DOS on PC DOS 7.x, which tries this before AH=36h) falls back
+     * to AH=36h, which we answer above. */
+    unsigned char far *rootpath = MK_FP(r.w.ds, r.w.dx);
+    unsigned char drv = 0xff;
+    if ((rootpath[0] != 0) && (rootpath[1] == ':'))
+      drv = DRIVETONUM(rootpath[0]);
+    if ((drv <= 25) && (glob_data.ldrv[drv] != 0xff)) {
+      r.w.ax = 0x7100;      /* unsupported function */
+      r.w.flags |= INTR_CF; /* CF set = error */
+      return;               /* handled here -- do NOT chain */
+    }
+  }
   if (r.h.ah == 0x71) {
     /* increment 2: service LFN subfunctions for our drive(s) here */
     ;

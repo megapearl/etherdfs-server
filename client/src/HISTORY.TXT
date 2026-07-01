@@ -1,5 +1,23 @@
 EtherDFS changelog history
 
+--- Donald Flissinger fork (v0.1.0-dev line) ---
+
+fork [2026-07-01]:
+ - fix: DIR under 4DOS now lists files. 4DOS's DIR queries free space
+   (INT 21h/AH=36h, and INT 21h/AX=7303h on PC DOS 7.x) BEFORE the listing and
+   aborts the whole listing if it gets AX=0xFFFF (invalid drive). DOS answers
+   AH=36h locally for our PHYSICAL-flagged redirector drive and never routes it
+   to us, returning 0xFFFF. The client now answers AH=36h/7303h for its own
+   drives directly with a valid volume, so 4DOS proceeds to the file
+   enumeration. COMMAND.COM was unaffected (it ignored the bad free-space and
+   listed anyway); it now also gets a sane "bytes free" footer.
+ - fix(server): synthetic volume label is opt-in (only when a label is set).
+ - fix(server): expand '*' wildcard to '?' in filename2fcb (FCB mask
+   expansion), fixing "dir e:\" under COMMAND.COM.
+ - fix(client): drop the doubled 'v' in the version banner.
+
+--- upstream (Mateusz Viste) ---
+
 v0.8.2 [2018-02-03]:
  - support for lock/unlock operations (INT 2Fh,110Ah).
 
