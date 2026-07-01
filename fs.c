@@ -178,8 +178,19 @@ void filename2fcb(char *d, const char *s) {
       break;
     d[i] = '.';
   }
-  /* fill in the filename, up to 8 chars or first dot, whichever comes first */
+  /* fill in the filename, up to 8 chars or first dot, whichever comes first.
+   * A '*' is a wildcard for "all remaining positions", expanded to '?' up to
+   * the end of the field -- the standard DOS FCB expansion (INT 21h/AH=29h).
+   * Search masks can arrive unexpanded (e.g. "*.*") from callers that bypass
+   * DOS's normal path processing, such as 4DOS's DIR routed through the "find
+   * first without CDS" (INT 2Fh/1119h) path. Real filenames never contain '*',
+   * so this stays a no-op for actual names. */
   for (; i < 8; i++) {
+    if (s[i] == '*') {
+      for (; i < 8; i++)
+        d[i] = '?';
+      break;
+    }
     if ((s[i] == '.') || (s[i] == 0))
       break;
     d[i] = upchar(s[i]);
@@ -193,6 +204,13 @@ void filename2fcb(char *d, const char *s) {
   /* fill in the extension */
   d += 8;
   for (i = 0; i < 3; i++) {
+    if (s[i] == '*') { /* wildcard: fill the rest of the extension with '?' */
+      for (; i < 3; i++) {
+        *d = '?';
+        d++;
+      }
+      break;
+    }
     if ((s[i] == '.') || (s[i] == 0))
       break;
     *d = upchar(s[i]);
