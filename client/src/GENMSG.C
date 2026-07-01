@@ -66,7 +66,9 @@ void genmsg(char *fname, char *msg) {
 int main(void) {
 
   genmsg("msg\\help.c",
-    "EtherDFS v" PVER "\r\n"
+    /* NB: PVER already carries the leading 'v' (server scheme v0.1.0-...), so
+     * do NOT prefix another 'v' here -- that produced the "vv0.1.0" banner. */
+    "EtherDFS " PVER "\r\n"
     "A network drive for DOS, running over raw ethernet\r\n"
     "Copyright (C) " PDATE " Mateusz Viste (original author)\r\n"
     "LFN fork (C) 2026 Donald Flissinger <donald@flissinger.com>\r\n"
@@ -121,7 +123,7 @@ int main(void) {
 
   genmsg("msg\\nosrvfnd.c", "No EtherSRV server found on the LAN (not for requested drive at least).\r\n");
 
-  genmsg("msg\\instlled.c", "EtherDFS v" PVER " installed (local MAC ");
+  genmsg("msg\\instlled.c", "EtherDFS " PVER " installed (local MAC "); /* PVER carries the 'v' */
 
   genmsg("msg\\pktdrvat.c", ", pktdrvr at INT ");
 
