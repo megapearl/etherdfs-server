@@ -2,6 +2,43 @@ EtherDFS changelog history
 
 --- Donald Flissinger fork (v0.1.0-dev line) ---
 
+fork [2026-07-02] -- native LFN, Phase-2 increment 3: open/create with long
+names (validated on real hardware; open/type/copy/create of long-named files
+now work, not just DIR):
+ - feat: INT 21h/AX=716Ch (LFN create-or-open) for our own drives. The client
+   resolves the long name to its 8.3 alias via the server (AL_LFN_OPEN 0x43 as
+   an existence probe; AL_LFN_CREATE 0x44 when the Win95 action word requires
+   create/truncate -- which lands the file under its REAL long name and applies
+   the create attributes server-side), then PASSES DOWN a classic INT 21h/AX=
+   6C00h open of the alias path to the previous INT 21h handler. DOS allocates
+   the JFT/SFT/handle itself and routes through our proven INT 2Fh redirector,
+   so read/write/seek/close ride the existing 8.3 path with no SFT work in the
+   client. Falls back to classic 3Dh open if a kernel lacks 6C00h. The action-
+   taken (1 opened / 2 created / 3 replaced) is synthesized client-side because
+   6C00h has documented CX-return kernel bugs on redirector drives.
+   Pass-down mechanics: 'pushf;cli;call dword ptr glob_prev21call' (m16:16, set
+   at install, offset-low/segment-high like the packet-driver call); the server
+   round-trip runs first on the resident stack, then the pass-down runs AFTER
+   the caller stack is restored so the nested 2Fh open is not seen as SS==DS by
+   the reentrancy guard.
+ - feat(server): Win95 long-name matching for the LFN find opcodes (matchlfn2
+   mask): an exact long leaf with spaces/>8-char base/multiple dots/~N alias, or
+   a mid-name wildcard, now matches (previously findfile only FCB-matched the
+   8.3 alias, so "Games List.txt" was unfindable -- which the 716Ch alias probe
+   needs). FINDNEXT gained an optional additive LFNSTR mask tail; legacy 8.3
+   opcodes pass NULL and are byte-identical to before.
+ - scope note: only the leaf name is alias-translated; a path with LONG
+   intermediate directory components needs a future truename (7160h) op --
+   parents must be 8.3-clean for now. Copying a long name to a NON-LFN drive
+   (e.g. local C:) truncates to 8.3 -- that is the target drive's limitation,
+   not ours; copy to another EtherDFS drive preserves the long name.
+ - fix: DATASEGSZ 4096 -> 4608 for the increment-3 globals (find-slot long
+   masks, pass-down path buffer); verified against the linker map (DGROUP 4064,
+   ~1566 bytes resident stack). Pass-down path always keeps the "X:" drive
+   prefix so it resolves against OUR drive, never the process default drive.
+ - tests: server exact/wildcard long-name matching + FindNext-with-mask-tail
+   regression (test_proto.c); fixture gains "my long file.txt".
+
 fork [2026-07-02] -- native LFN, Phase-2 increment 2 (validated on real
 hardware: PC DOS 7.10 + 4DOS 8.00 + EMM386, with Win95LFN=Yes):
  - feat: DIR on an EtherDFS drive under an LFN-aware shell now shows REAL long

@@ -27,9 +27,12 @@
  * the top 132 stack bytes were not copied: whether that bit depended on which
  * locals the compiler spilled there -- adding code to main() made it drop the
  * ARGFL_AUTO flag, silently skipping server auto-discovery (mapping showed
- * MAC 00:00:00:00:00:00). 4096 covers the whole 3632-byte DGROUP with margin
- * and gives the resident stack more headroom (SP starts at DATASEGSZ-2). */
-#define DATASEGSZ 4096
+ * MAC 00:00:00:00:00:00). MUST be >= the linker map's DGROUP size (which
+ * includes the transient STACK segment at its top). As of increment 3:
+ * DGROUP = 4064 (0xFE0), so 4608 covers it with margin and leaves ~1566 bytes
+ * of resident stack (SP starts at DATASEGSZ-2, resident non-stack data ends
+ * ~3040). RE-CHECK THE MAP after every globals change. */
+#define DATASEGSZ 4608
 
 /* a few globals useful only for debug messages */
 #if DEBUGLEVEL > 0
@@ -103,6 +106,10 @@ struct lfnfindslot {
   unsigned short fpos;       /* server position/nth (cursor) */
   unsigned char attr;        /* search attribute mask */
   unsigned char tmpl[11];    /* 8.3 FCB search template (for FindNext) */
+  unsigned char mask[64];    /* ASCIZ long-name mask, appended to FINDNEXT as
+                              * an LFNSTR tail so the server long-matches like
+                              * FindFirst (Win95). Empty = don't append (masks
+                              * >63 chars degrade to SFN-template matching). */
 };
 static struct lfnfindslot glob_lfn_find[LFN_FINDMAX];
 /* Reentrancy is guarded STATELESSLY (no flag that could get stuck): both the
@@ -114,6 +121,20 @@ static struct lfnfindslot glob_lfn_find[LFN_FINDMAX];
 static unsigned char glob_lfn_op = 0;    /* AL_LFN_FINDFIRST / FINDNEXT for the helper */
 static unsigned char glob_lfn_slot = 0;  /* find slot the helper operates on */
 static unsigned char glob_lfn_drv = 0;   /* 0-based drive index for the helper */
+/* previous INT 21h handler as an m16:16 for 'call dword ptr' pass-down
+ * (offset in the LOW word, segment in the HIGH word -- same convention as
+ * glob_pktdrv_pktcall; the seg,off field ORDER of prev_21_handler_seg/off in
+ * tsrshareddata is wrong for an indirect call operand) */
+static unsigned long glob_prev21call = 0;
+/* 716Ch open/create: state passed between the resident-stack helper
+ * (lfn_do_open: server round-trip, alias resolution) and the dispatcher
+ * (which does the classic 6C00h pass-down on the CALLER stack afterwards) */
+static unsigned char glob_lfn_openpath[128]; /* ASCIZ 8.3 pass-down path */
+static unsigned short glob_lfn_opensyn;      /* CX action-taken to synthesize */
+static unsigned short glob_lfn_openerr;      /* 0 = proceed to pass-down, else
+                                              * DOS error code to fail with */
+static unsigned short glob_lfn_pdax;         /* pass-down result AX */
+static unsigned short glob_lfn_pdfl;         /* pass-down result FLAGS */
 static unsigned short glob_o21ss;         /* saved SS for the 21h-hook stack swap */
 static unsigned short glob_o21sp;         /* saved SP for the 21h-hook stack swap */
 

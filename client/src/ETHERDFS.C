@@ -1121,6 +1121,8 @@ void __interrupt __far inthandler(union INTPACK r) {
  * redirector path are completely untouched. */
 #define AL_LFN_FINDFIRST 0x41
 #define AL_LFN_FINDNEXT  0x42
+#define AL_LFN_OPEN      0x43
+#define AL_LFN_CREATE    0x44
 
 /* FILETIME <-> DOS date/time conversion core for the 71A7h responder (resident;
  * no 32-bit mul/div -- see the header for the resident-safety rules) */
@@ -1241,6 +1243,14 @@ static void lfn_do_find(void) {
     for (k = 0; (ls + k < n) && (k < sizeof(leaf) - 1); k++) leaf[k] = sb[3 + ls + k];
     leaf[k] = 0;
     lfn_leaf2fcb(glob_lfn_find[slot].tmpl, leaf); /* store mask for FindNext */
+    /* also keep the long mask so FindNext can long-match like FindFirst
+       (Win95); masks that don't fit degrade to SFN-template-only matching */
+    for (k = 0; (leaf[k] != 0) && (k < 63); k++)
+      glob_lfn_find[slot].mask[k] = leaf[k];
+    if (leaf[k] == 0)
+      glob_lfn_find[slot].mask[k] = 0;
+    else
+      glob_lfn_find[slot].mask[0] = 0; /* >63 chars: don't send a partial mask */
     rc = sendquery(AL_LFN_FINDFIRST, glob_lfn_drv, plen, &ans, &rax, 0);
   } else { /* FINDNEXT */
     unsigned short i;
@@ -1251,6 +1261,16 @@ static void lfn_do_find(void) {
     sb[4] = glob_lfn_find[slot].attr;
     for (i = 0; i < 11; i++) sb[5 + i] = glob_lfn_find[slot].tmpl[i];
     plen = 16;
+    if (glob_lfn_find[slot].mask[0] != 0) {
+      /* OPTIONAL additive tail: LFNSTR long-name mask, so a new server
+         long-matches FindNext like FindFirst; old servers ignore it */
+      unsigned short ml = 0;
+      while (glob_lfn_find[slot].mask[ml] != 0) ml++;
+      sb[16] = (unsigned char)(ml & 0xff);
+      sb[17] = (unsigned char)((ml >> 8) & 0xff);
+      for (i = 0; i < ml; i++) sb[18 + i] = glob_lfn_find[slot].mask[i];
+      plen = (unsigned short)(18 + ml);
+    }
     rc = sendquery(AL_LFN_FINDNEXT, glob_lfn_drv, plen, &ans, &rax, 0);
   }
   if ((rc >= 35) && (rc != 0xffffu)) {        /* a real record */
@@ -1269,6 +1289,111 @@ static void lfn_do_find(void) {
     glob_intregs.w.ax = 0x12;                 /* ERROR_NO_MORE_FILES */
     glob_intregs.w.flags |= INTR_CF;
   }
+}
+
+/* 716Ch open/create, part 1 of 2 -- the server work. Runs ON THE RESIDENT
+ * STACK (uses only glob_intregs/resident globals, like lfn_do_find). Probes
+ * existence via AL_LFN_OPEN (a server-side stat: no open file, no side
+ * effects), applies the Win95 action word (glob_intregs.w.dx: bit0
+ * open-if-exists, bit1 truncate-if-exists, bit4 create-if-missing), creating/
+ * truncating via AL_LFN_CREATE when required (which creates the file under
+ * its REAL long name server-side and applies the CX attributes), and prepares
+ * for part 2 (the classic 6C00h pass-down, done by the dispatcher AFTER the
+ * stack is restored -- the nested DOS open re-enters our 2Fh handler, which
+ * must not see SS==DS):
+ *  - glob_lfn_openpath = ASCIZ "X:\dir\ALIAS.EXT" (caller's dir part + the
+ *    server-reported 8.3 alias of the leaf),
+ *  - glob_lfn_opensyn  = CX action-taken to report (1 opened / 2 created /
+ *    3 replaced) -- synthesized here because 6C00h on redirector drives has
+ *    documented CX-return kernel bugs,
+ *  - glob_lfn_openerr  = 0 to proceed, else the DOS error to fail with. */
+static void lfn_do_open(void) {
+  unsigned char *sb = glob_pktdrv_sndbuff + 60;
+  unsigned char *ans;
+  unsigned short *rax;
+  unsigned short rc, n, k, ls, action, exists;
+  unsigned char far *path = MK_FP(glob_intregs.w.ds, glob_intregs.w.si);
+  action = glob_intregs.w.dx & 0x0013; /* bit0 open, bit1 truncate, bit4 create */
+  glob_lfn_openerr = 0;
+  /* copy the drive-stripped path into the request as LFNSTR (probe) */
+  if ((path[0] != 0) && (path[1] == ':')) path = path + 2;
+  n = 0;
+  while ((path[n] != 0) && (n < 255)) { sb[3 + n] = path[n]; n++; }
+  sb[0] = 0;                          /* open mode byte (server ignores it) */
+  sb[1] = (unsigned char)(n & 0xff);  /* LFNSTR u16 length LE */
+  sb[2] = (unsigned char)((n >> 8) & 0xff);
+  rc = sendquery(AL_LFN_OPEN, glob_lfn_drv, (unsigned short)(3 + n), &ans, &rax, 0);
+  if (rc == 0xffffu) { glob_lfn_openerr = 0x02; return; } /* net timeout */
+  exists = (rc >= 35) ? 1 : 0;
+  /* Win95 716Ch action semantics */
+  if (exists) {
+    if (action & 0x02) {        /* truncate/replace-if-exists */
+      glob_lfn_opensyn = 3;
+    } else if (action & 0x01) { /* open-if-exists */
+      glob_lfn_opensyn = 1;
+    } else {                    /* create-new-only, but it exists */
+      glob_lfn_openerr = 0x50;  /* file already exists */
+      return;
+    }
+  } else {
+    if (*rax != 0x02) { glob_lfn_openerr = *rax ? *rax : 0x02; return; }
+    if (action & 0x10) {        /* create-if-missing */
+      glob_lfn_opensyn = 2;
+    } else {                    /* open/truncate of a missing file */
+      glob_lfn_openerr = 0x02;  /* file not found */
+      return;
+    }
+  }
+  if ((glob_lfn_opensyn == 2) || (glob_lfn_opensyn == 3)) {
+    /* (re)create server-side: lands under the REAL long name, truncates an
+     * existing file, applies the create attributes; reply carries the alias */
+    unsigned char cattr = (unsigned char)(glob_intregs.w.cx & 0xff);
+    unsigned short m = 0;
+    path = MK_FP(glob_intregs.w.ds, glob_intregs.w.si);
+    if ((path[0] != 0) && (path[1] == ':')) path = path + 2;
+    while ((path[m] != 0) && (m < 255)) { sb[4 + m] = path[m]; m++; }
+    sb[0] = cattr;
+    sb[1] = 0;                          /* reserved */
+    sb[2] = (unsigned char)(m & 0xff);  /* LFNSTR u16 length LE */
+    sb[3] = (unsigned char)((m >> 8) & 0xff);
+    rc = sendquery(AL_LFN_CREATE, glob_lfn_drv, (unsigned short)(4 + m), &ans, &rax, 0);
+    if ((rc < 35) || (rc == 0xffffu)) {
+      glob_lfn_openerr = (rc == 0xffffu) ? 0x05 : (*rax ? *rax : 0x05);
+      return;
+    }
+  }
+  /* build the pass-down path: caller's path up to and incl. the last '\',
+   * then the alias leaf ("NAME.EXT") from the reply's FCB field [1..11].
+   * The prefix ALWAYS includes the leading "X:" so DOS resolves against OUR
+   * drive, never the process's current default drive. For a drive-relative
+   * path with no backslash (e.g. "X:FILE.TXT") ls stays past the colon so the
+   * result is "X:ALIAS.EXT" (drive-relative to X's own current dir, exactly
+   * how the redirector resolves it). */
+  path = MK_FP(glob_intregs.w.ds, glob_intregs.w.si);
+  n = 0;
+  ls = ((path[0] != 0) && (path[1] == ':')) ? 2 : 0; /* keep "X:" at minimum */
+  while ((path[n] != 0) && (n < 255)) {
+    if (path[n] == '\\') ls = (unsigned short)(n + 1);
+    n++;
+  }
+  if (ls + 13 >= sizeof(glob_lfn_openpath)) { /* dir part too long */
+    glob_lfn_openerr = 0x03; /* path not found */
+    return;
+  }
+  for (k = 0; k < ls; k++) glob_lfn_openpath[k] = path[k];
+  /* alias FCB -> "NAME.EXT" */
+  for (n = 0; n < 8; n++) {
+    if (ans[1 + n] == ' ') break;
+    glob_lfn_openpath[k++] = ans[1 + n];
+  }
+  if (ans[9] != ' ') {
+    glob_lfn_openpath[k++] = '.';
+    for (n = 8; n < 11; n++) {
+      if (ans[1 + n] == ' ') break;
+      glob_lfn_openpath[k++] = ans[1 + n];
+    }
+  }
+  glob_lfn_openpath[k] = 0;
 }
 /* ========================================================================== */
 
@@ -1459,6 +1584,21 @@ void __interrupt __far inthandler21(union INTPACK r) {
           return;
         }
       }
+    } else if (r.h.al == 0x6C) { /* 716Ch LFN open/create */
+      /* Path is at DS:SI (unlike find's DS:DX!). Server work first (probe/
+       * create + alias, on the resident stack), then a classic 6C00h open of
+       * the alias path is passed down to DOS on the CALLER's stack -- DOS
+       * allocates JFT/SFT/handle and routes through our proven 2Fh redirector,
+       * so read/write/seek/close just work. DI (alias hint) is ignored unless
+       * BX bit 10, which nothing we know sets. */
+      unsigned char far *pp = MK_FP(r.w.ds, r.w.si);
+      unsigned char idx = 0xff;
+      if ((pp[0] != 0) && (pp[1] == ':')) idx = DRIVETONUM(pp[0]);
+      if ((idx <= 25) && (glob_data.ldrv[idx] != 0xff)) { /* our drive */
+        glob_lfn_drv = idx;
+        glob_lfn_op = AL_LFN_OPEN;
+        do_lfn = 1;
+      }
     } else if (r.h.al == 0xA7) { /* 71A7h FILETIME <-> DOS date/time */
       /* NOT drive-specific: a pure calendar conversion (see ftconv.h). LFN
        * shells (4DOS) convert our FindData FILETIMEs for display with BL=0;
@@ -1546,15 +1686,105 @@ void __interrupt __far inthandler21(union INTPACK r) {
         mov sp, DATASEGSZ-2
         sti
       }
-      lfn_do_find();
+      if (glob_lfn_op == AL_LFN_OPEN)
+        lfn_do_open();
+      else
+        lfn_do_find();
       _asm {
         cli
         mov SS, glob_o21ss
         mov SP, glob_o21sp
         sti
       }
-      copybytes(&r, &glob_intregs, sizeof(union INTPACK));
-      return;
+      if (glob_lfn_op != AL_LFN_OPEN) {
+        copybytes(&r, &glob_intregs, sizeof(union INTPACK));
+        return;
+      }
+      /* 716Ch part 2: the pass-down, on the CALLER's stack (a nested 2Fh open
+       * of our drive must not see SS==DS). Results are captured into
+       * DS-relative globals only AFTER all registers (incl. BP) are restored,
+       * because DOS may clobber BP during the call and stack locals are
+       * BP-relative. */
+      if (glob_lfn_openerr != 0) {
+        r.w.ax = glob_lfn_openerr;
+        r.w.flags |= INTR_CF;
+        return;
+      }
+      {
+        unsigned short pbx = (unsigned short)(r.w.bx & ~0x1F00u); /* strip
+                              716Ch-only bits 8-10 + reserved 11-12; bits 0-7
+                              (access/share/inherit) and 13-14 map 1:1 */
+        unsigned short pcx = r.w.cx;
+        _asm {
+          push bp
+          push ds
+          push es
+          push si
+          push di
+          push bx
+          mov ax, 6C00h
+          mov bx, pbx
+          mov cx, pcx
+          mov dx, 0001h      /* always open-existing: the server already
+                                created/truncated per the 716Ch action word */
+          mov si, offset glob_lfn_openpath /* DS:SI, DS = resident segment */
+          sti
+          pushf
+          cli
+          call dword ptr glob_prev21call
+          pop bx
+          pop di
+          pop si
+          pop es
+          pop ds
+          pop bp
+          mov glob_lfn_pdax, ax
+          pushf
+          pop ax
+          mov glob_lfn_pdfl, ax
+        }
+        if (glob_lfn_pdfl & 0x0001) { /* CF set: open failed */
+          if (glob_lfn_pdax == 0x0001) {
+            /* AX=1 invalid function: this DOS lacks 6C00h -- retry with the
+             * classic 3Dh open (mode = caller's low BX bits) */
+            unsigned short pmode = (unsigned short)(0x3D00u | (pbx & 0xffu));
+            _asm {
+              push bp
+              push ds
+              push es
+              push si
+              push di
+              push bx
+              mov ax, pmode
+              mov si, offset glob_lfn_openpath
+              mov dx, si   /* 3Dh takes the path at DS:DX */
+              sti
+              pushf
+              cli
+              call dword ptr glob_prev21call
+              pop bx
+              pop di
+              pop si
+              pop es
+              pop ds
+              pop bp
+              mov glob_lfn_pdax, ax
+              pushf
+              pop ax
+              mov glob_lfn_pdfl, ax
+            }
+          }
+        }
+        if (glob_lfn_pdfl & 0x0001) {
+          r.w.ax = glob_lfn_pdax;   /* pass the DOS error through */
+          r.w.flags |= INTR_CF;
+        } else {
+          r.w.ax = glob_lfn_pdax;   /* the real DOS handle */
+          r.w.cx = glob_lfn_opensyn; /* synthesized action-taken (1/2/3) */
+          r.w.flags &= ~INTR_CF;
+        }
+        return;
+      }
     }
     /* other 71xx, or not our drive/handle -> chain */
   }
@@ -2350,6 +2580,9 @@ int main(int argc, char **argv) {
     }
     glob_data.prev_21_handler_seg = s21;
     glob_data.prev_21_handler_off = o21;
+    /* m16:16 form (offset low, segment high) for the 716Ch pass-down's
+     * 'call dword ptr' -- same convention as glob_pktdrv_pktcall */
+    glob_prev21call = ((unsigned long)s21 << 16) | o21;
   }
 
   /* is the TSR installed already? */
