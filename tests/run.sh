@@ -10,10 +10,10 @@ cd "$(dirname "$0")/.."   # repo root (server sources live here)
 apk add --no-cache gcc musl-dev linux-headers libpcap-dev >/dev/null 2>&1 || true
 
 echo "=== compiling test_lfn (fs.c unit test) ==="
-gcc tests/test_lfn.c fs.c -o /tmp/test_lfn -O2 -Wall -std=gnu89 -Wno-long-long
+gcc tests/test_lfn.c fs.c -o /tmp/test_lfn -O2 -Wall -std=gnu89 -Wno-long-long -I.
 
 echo "=== compiling test_proto (process() wire test; includes ethersrv.c) ==="
-gcc tests/test_proto.c fs.c lock.c -o /tmp/test_proto -O2 -std=gnu89 -Wno-long-long -lpcap
+gcc tests/test_proto.c fs.c lock.c -o /tmp/test_proto -O2 -std=gnu89 -Wno-long-long -lpcap -I.
 
 # build a fixture directory with the regression name set
 FIX=/tmp/lfn_fixture

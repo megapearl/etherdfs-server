@@ -130,6 +130,51 @@ int main(int argc, char **argv) {
     fpos = ans.frame[60 + 22] | (ans.frame[60 + 23] << 8);
   }
 
+  printf("=== AL_LFN_FINDFIRST with Win95 mask \"\\*\" (must match files WITH extensions) ===\n");
+  /* Regression for the empty-extension FCB template: 4DOS (any Win95-style
+   * caller) sends mask "*", which classic FCB expansion turned into
+   * "????????   " (blank ext) so every file with an extension was skipped and
+   * DIR showed only directories. lfn_mask2fcb must expand "*" to 11x'?'.
+   * Enumerate with attr 0x10 (what 4DOS's DIR passes) and REQUIRE that at
+   * least one entry with a non-blank SFN extension is returned. */
+  {
+    int got_ext_file = 0;
+    pl[0] = 0x10; /* attr: dirs allowed, normal files must still match */
+    n = 1 + put_lfnstr(pl + 1, "\\*");
+    memset(&ans, 0, sizeof(ans));
+    reqlen = build_req(frame, 0x41, pl, n);
+    rc = process(&ans, frame, reqlen, mymac, rootarray);
+    show_resp("FINDFIRST*", ans.frame, rc);
+    dirss = ans.frame[60 + 20] | (ans.frame[60 + 21] << 8);
+    fpos = ans.frame[60 + 22] | (ans.frame[60 + 23] << 8);
+    for (round = 0; round < 40; round++) {
+      unsigned char *sfn;
+      if ((ans.frame[58] | (ans.frame[59] << 8)) != 0)
+        break;
+      sfn = ans.frame + 60 + 1;
+      if ((ans.frame[60] & 0x18) == 0 && memcmp(sfn + 8, "   ", 3) != 0)
+        got_ext_file = 1;
+      pl[0] = dirss & 0xff;
+      pl[1] = (dirss >> 8) & 0xff;
+      pl[2] = fpos & 0xff;
+      pl[3] = (fpos >> 8) & 0xff;
+      pl[4] = 0x10;
+      memset(pl + 5, '?', 11); /* the (fixed) client template for mask "*" */
+      memset(&ans, 0, sizeof(ans));
+      reqlen = build_req(frame, 0x42, pl, 16);
+      rc = process(&ans, frame, reqlen, mymac, rootarray);
+      if ((ans.frame[58] | (ans.frame[59] << 8)) != 0)
+        break;
+      show_resp("FINDNEXT*", ans.frame, rc);
+      fpos = ans.frame[60 + 22] | (ans.frame[60 + 23] << 8);
+    }
+    if (!got_ext_file) {
+      printf("  FAIL: mask \"*\" returned no file with an extension\n");
+      return (1);
+    }
+    printf("  OK: mask \"*\" matched file(s) with extensions\n");
+  }
+
   printf("=== AL_LFN_CREATE (0x44) a 9-char-base long file ===\n");
   pl[0] = 0x20; /* cattr archive */
   pl[1] = 0x00;

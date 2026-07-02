@@ -330,6 +330,25 @@ static int lfn_fill_resp(unsigned char *answ, struct fileprops *fp,
   return (35 + ln);
 }
 
+/* FCB-ize an LFN search mask. Like filename2fcb(), but with the Win95 LFN
+ * wildcard rule (RBIL, INT 21h/AX=714Eh): a '*' matches ACROSS the dot, and
+ * "*" == "*.*" == match any filename. Classic FCB expansion of a dot-less
+ * mask like "*" or "FOO*" leaves the extension field BLANK (matches only
+ * extension-less names), which made LFN DIR listings drop every file with an
+ * extension. So: if the mask contains a '*' but no '.', wildcard the
+ * extension field too. Used ONLY by the LFN find opcodes -- the legacy 8.3
+ * path keeps the classic filename2fcb() semantics. The CLIENT applies the
+ * same rule when it builds the FINDNEXT template (lfn_leaf2fcb); the two MUST
+ * stay identical or FindFirst/FindNext would enumerate different sets. */
+static void lfn_mask2fcb(char *d, const char *mask) {
+  filename2fcb(d, mask);
+  if ((strchr(mask, '.') == NULL) && (strchr(mask, '*') != NULL)) {
+    int i;
+    for (i = 8; i < 11; i++)
+      d[i] = '?';
+  }
+}
+
 /* Given a resolved full Linux path, sets fp->fcbname to the deterministic 8.3
  * SFN alias of its leaf (matching what FindFirst would report) and returns a
  * pointer to the real (long) leaf within fullpath. */
@@ -997,7 +1016,7 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
     } else {
       explodepath(dirpart, leafmask, dlfn, (int)strlen(dlfn));
       resolve_path(resolved, root, dirpart);
-      filename2fcb(filemaskfcb, leafmask);
+      lfn_mask2fcb(filemaskfcb, leafmask);
       DBG("LFN_FINDFIRST in '%s' mask '%s'\n", resolved, leafmask);
       flags = 0;
       if (isroot(root, resolved) != 0)
