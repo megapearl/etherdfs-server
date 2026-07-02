@@ -2,6 +2,46 @@ EtherDFS changelog history
 
 --- Donald Flissinger fork (v0.1.0-dev line) ---
 
+fork [2026-07-02] -- native LFN, Phase-2 increment 2 (validated on real
+hardware: PC DOS 7.10 + 4DOS 8.00 + EMM386, with Win95LFN=Yes):
+ - feat: DIR on an EtherDFS drive under an LFN-aware shell now shows REAL long
+   filenames (mixed case, spaces), with sizes and dates. The INT 21h hook
+   services the Win95 LFN API for our own drives: 71A0h volume info (local,
+   advertises LFN via BX bit14), 714Eh FindFirstFile / 714Fh FindNextFile
+   (server round-trip via the new additive opcodes 0x41/0x42, filling the
+   caller's 318-byte WIN32_FIND_DATA: long name @0x2C, 8.3 alias @0x130,
+   FILETIME or DOS-packed times per SI), 71A1h FindClose, and 71A7h
+   FILETIME<->DOS date/time conversion (pure local math, both directions).
+   A 4-slot find-handle table (handles 0xEF00|slot) keeps search state
+   client-side; foreign handles and other drives chain to the previous
+   handler. Everything 8.3 (COMMAND.COM, the INT 2Fh redirector) is untouched
+   and re-validated.
+ - The blocking server round-trip from the INT 21h hook reuses the proven
+   INT 2Fh stack-switch discipline (own save slots) plus a STATELESS nesting
+   guard: a handler entered with SS already == DS is nested inside an outer
+   switched context and bails/chains instead of resetting the shared resident
+   stack. (An earlier flag-based guard could get stuck and killed all 2Fh
+   service.)
+ - fix: DATASEGSZ 3500 -> 4096. The resident-segment copy must cover the
+   WHOLE DGROUP including the transient stack: main()'s parsed args live near
+   the stack top and arrived as garbage after the switch, silently dropping
+   the auto-discovery flag (server MAC 00:00:00:00:00:00, empty DIR).
+ - fix: the installer's DS-relocation patch for the INT 2Fh handler now scans
+   for the "MVet" signature (like the INT 21h "MV21" patch) instead of using
+   a hardcoded offset that broke whenever the prologue shifted ("DS/SS
+   relocation failed"). The install failure path also switches back to the
+   original stack before freeing the new segment (it used to free the segment
+   its own SS lived in: hang / EMM386 #12 stack fault).
+ - fix: Win95 wildcard semantics for LFN masks on the client FINDNEXT
+   template ('*' with no dot also wildcards the extension field, and the
+   extension scan stops at a second dot) -- byte-identical to the server's
+   lfn_mask2fcb, verified by a 17k-mask fuzz harness. Without this, DIR
+   listed only directories ("dir" vs "dir *.*" differed).
+ - tests: FTCONV.H golden vectors + an exhaustive 46751-date round-trip sweep
+   (tests/test_ftconv.c); client/server mask-identity fuzz; the server wire
+   test gained a mask-"*" regression that fails the build if files with
+   extensions are dropped.
+
 fork [2026-07-01]:
  - fix: DIR under 4DOS now lists files. 4DOS's DIR queries free space
    (INT 21h/AH=36h, and INT 21h/AX=7303h on PC DOS 7.x) BEFORE the listing and

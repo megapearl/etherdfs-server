@@ -976,6 +976,28 @@ void __interrupt __far inthandler(union INTPACK r) {
     }
   }
 
+  /* Stateless reentrancy guard: if we are entered with SS already == DS, we are
+   * nested inside an outer handler that already switched to the resident stack
+   * (a 2Fh or a 21h-LFN send blocked in sendquery with interrupts on). Switching
+   * again would reset SP=DATASEGSZ-2 and clobber the outer's live frame, so chain
+   * this rare interrupt-issued call to the previous handler instead. In the
+   * normal (non-nested) case SS is DOS's/the app's stack, never our resident DS. */
+  { volatile unsigned char _nested = 0;
+    _asm {
+      push ax
+      push bx
+      mov ax, ss
+      mov bx, ds
+      cmp ax, bx
+      jne n2fok
+      mov byte ptr _nested, 1
+    n2fok:
+      pop bx
+      pop ax
+    }
+    if (_nested != 0) goto CHAINTOPREVHANDLER;
+  }
+
   /* if not related to a redirector function (AH=11h), or the function is
    * an 'install check' (0), or the function is over our scope (2Eh), or it's
    * an otherwise unsupported function (as pointed out by supportedfunctions),
@@ -1089,6 +1111,166 @@ void __interrupt __far inthandler(union INTPACK r) {
   CHAINTOPREVHANDLER:
   _mvchain_intr(MK_FP(glob_data.prev_2f_handler_seg, glob_data.prev_2f_handler_off));
 }
+
+
+/* ===================== LFN client service (increment 2) =====================
+ * Services INT 21h/AX=714Eh (FindFirstFile), 714Fh (FindNextFile), 71A1h
+ * (FindClose) for our own drive(s) by talking to the server's additive LFN
+ * opcodes (AL_LFN_FINDFIRST 0x41 / FINDNEXT 0x42). 71A0h volume-info is answered
+ * locally (advertising LFN so LFN-aware shells route here). 8.3 and the INT 2Fh
+ * redirector path are completely untouched. */
+#define AL_LFN_FINDFIRST 0x41
+#define AL_LFN_FINDNEXT  0x42
+
+/* FILETIME <-> DOS date/time conversion core for the 71A7h responder (resident;
+ * no 32-bit mul/div -- see the header for the resident-safety rules) */
+#include "ftconv.h"
+
+static unsigned char lfn_upc(unsigned char c) {
+  return ((c >= 'a') && (c <= 'z')) ? (unsigned char)(c - 32) : c;
+}
+
+/* Replicate the server's LFN mask FCB-ization (lfn_mask2fcb = filename2fcb +
+ * the Win95 wildcard rule): expand an 8.3 leaf mask into an 11-byte FCB
+ * template, '*' -> '?' to end of field, uppercased, space-padded. Win95 LFN
+ * rule (RBIL, 714Eh): '*' matches ACROSS the dot and "*" == "*.*", so a mask
+ * containing '*' but NO dot must wildcard the extension field too -- classic
+ * FCB expansion would leave it blank ("matches only extension-less names"),
+ * which made DIR under 4DOS list only directories. Must stay IDENTICAL to the
+ * server's conversion or FindFirst (server template) and FindNext (this
+ * template) would enumerate different sets. (s is a near ASCIZ leaf; this only
+ * runs on the resident stack where SS==DS.) */
+static void lfn_leaf2fcb(unsigned char *d, unsigned char *s) {
+  int i;
+  unsigned char sawstar = 0, sawdot = 0;
+  for (i = 0; s[i] != 0; i++) {
+    if (s[i] == '*') sawstar = 1;
+    if (s[i] == '.') sawdot = 1;
+  }
+  for (i = 0; i < 11; i++) d[i] = ' ';
+  for (i = 0; i < 8; i++) {          /* '.'/'..' entries */
+    if (s[i] != '.') break;
+    d[i] = '.';
+  }
+  for (; i < 8; i++) {               /* name field */
+    if (s[i] == '*') { for (; i < 8; i++) d[i] = '?'; break; }
+    if ((s[i] == '.') || (s[i] == 0)) break;
+    d[i] = lfn_upc(s[i]);
+  }
+  if (sawstar && (sawdot == 0)) {    /* Win95: dot-less '*' wildcards the ext */
+    for (i = 8; i < 11; i++) d[i] = '?';
+    return;
+  }
+  while ((*s != '.') && (*s != 0)) s++;
+  if (*s == 0) return;
+  s++;                               /* skip the dot */
+  d += 8;
+  for (i = 0; i < 3; i++) {          /* extension field */
+    if (s[i] == '*') { for (; i < 3; i++) d[i] = '?'; break; }
+    if ((s[i] == '.') || (s[i] == 0)) break; /* '.'-break mirrors the server's
+                                              * filename2fcb: multi-dot masks
+                                              * (e.g. "*.c.bak") must FCB-ize
+                                              * identically on both sides */
+    d[i] = lfn_upc(s[i]);
+  }
+}
+
+/* Format an 11-byte FCB name ("NAME    EXT") into an ASCIZ "NAME.EXT" at the
+ * caller's (far) cAlternateFileName buffer. */
+static void lfn_fcb2asciz(unsigned char far *d, unsigned char *fcb) {
+  int i, k = 0;
+  for (i = 0; i < 8; i++) { if (fcb[i] == ' ') break; d[k++] = fcb[i]; }
+  if (fcb[8] != ' ') {
+    d[k++] = '.';
+    for (i = 8; i < 11; i++) { if (fcb[i] == ' ') break; d[k++] = fcb[i]; }
+  }
+  d[k] = 0;
+}
+
+/* Fill the caller's 318-byte WIN32_FIND_DATA (at fd, far) from an
+ * AL_LFN_FINDFIRST/NEXT reply payload r (near, in the resident recv buffer).
+ * Server §9.3 layout: [0]attr [1..11]FCB [12..15]DOS-time [16..19]size
+ * [20..21]dirss [22..23]fpos [24]resv [25..32]FILETIME [33..34]ln [35..]longname.
+ * si = the caller's date/time format selector (1 = DOS-packed, else FILETIME). */
+static void lfn_fill_finddata(unsigned char far *fd, unsigned char *r, unsigned short si) {
+  unsigned short i, ln;
+  for (i = 0; i < 0x2c; i++) fd[i] = 0;      /* zero the fixed header */
+  fd[0] = r[0];                              /* dwFileAttributes (low byte) */
+  if (si == 1) {                             /* DOS-packed date/time in low dword of write-time */
+    fd[0x14] = r[12]; fd[0x15] = r[13]; fd[0x16] = r[14]; fd[0x17] = r[15];
+  } else {                                   /* 64-bit FILETIME in all three slots */
+    for (i = 0; i < 8; i++) {
+      unsigned char b = r[25 + i];
+      fd[0x04 + i] = b; fd[0x0c + i] = b; fd[0x14 + i] = b;
+    }
+  }
+  fd[0x20] = r[16]; fd[0x21] = r[17];        /* nFileSizeLow (high stays 0) */
+  fd[0x22] = r[18]; fd[0x23] = r[19];
+  ln = (unsigned short)r[33] | ((unsigned short)r[34] << 8);
+  if (ln > 259) ln = 259;
+  for (i = 0; i < ln; i++) fd[0x2c + i] = r[35 + i]; /* cFileName (long) */
+  fd[0x2c + ln] = 0;
+  lfn_fcb2asciz(fd + 0x130, r + 1);          /* cAlternateFileName (8.3 alias) */
+}
+
+/* Runs ON THE RESIDENT STACK (SS=DS) via the same swap as the 2Fh handler, so
+ * it uses ONLY glob_intregs / resident globals, never the caller's 'r'. Sends
+ * the FindFirst/Next query (per glob_lfn_op), fills the caller's WIN32_FIND_DATA
+ * on success, updates the slot cursor, and sets glob_intregs (handle+CF-clear,
+ * or AX=0x12 no-more + CF). */
+static void lfn_do_find(void) {
+  unsigned char *sb = glob_pktdrv_sndbuff + 60;
+  unsigned char *ans;
+  unsigned short *rax;
+  unsigned short rc, plen;
+  unsigned char slot = glob_lfn_slot;
+  if (glob_lfn_op == AL_LFN_FINDFIRST) {
+    unsigned char far *path = MK_FP(glob_intregs.w.ds, glob_intregs.w.dx);
+    unsigned short n = 0, ls = 0, k;
+    unsigned char leaf[128]; /* big enough to hold any realistic mask leaf so
+                              * lfn_leaf2fcb finds the '.' exactly like the
+                              * server does (it truncates only absurd >126-char
+                              * search masks, which never occur in practice) */
+    if ((path[0] != 0) && (path[1] == ':')) path = path + 2; /* strip "X:" */
+    while ((path[n] != 0) && (n < 255)) { sb[3 + n] = path[n]; n++; }
+    sb[0] = glob_lfn_find[slot].attr;   /* allowable attr */
+    sb[1] = (unsigned char)(n & 0xff);  /* LFNSTR u16 length LE */
+    sb[2] = (unsigned char)((n >> 8) & 0xff);
+    plen = 3 + n;
+    for (k = 0; k < n; k++) if (sb[3 + k] == '\\') ls = k + 1; /* leaf start */
+    for (k = 0; (ls + k < n) && (k < sizeof(leaf) - 1); k++) leaf[k] = sb[3 + ls + k];
+    leaf[k] = 0;
+    lfn_leaf2fcb(glob_lfn_find[slot].tmpl, leaf); /* store mask for FindNext */
+    rc = sendquery(AL_LFN_FINDFIRST, glob_lfn_drv, plen, &ans, &rax, 0);
+  } else { /* FINDNEXT */
+    unsigned short i;
+    sb[0] = (unsigned char)(glob_lfn_find[slot].dirss & 0xff);
+    sb[1] = (unsigned char)((glob_lfn_find[slot].dirss >> 8) & 0xff);
+    sb[2] = (unsigned char)(glob_lfn_find[slot].fpos & 0xff);
+    sb[3] = (unsigned char)((glob_lfn_find[slot].fpos >> 8) & 0xff);
+    sb[4] = glob_lfn_find[slot].attr;
+    for (i = 0; i < 11; i++) sb[5 + i] = glob_lfn_find[slot].tmpl[i];
+    plen = 16;
+    rc = sendquery(AL_LFN_FINDNEXT, glob_lfn_drv, plen, &ans, &rax, 0);
+  }
+  if ((rc >= 35) && (rc != 0xffffu)) {        /* a real record */
+    unsigned char far *fd = MK_FP(glob_intregs.w.es, glob_intregs.w.di);
+    lfn_fill_finddata(fd, ans, glob_intregs.w.si);
+    glob_lfn_find[slot].dirss = (unsigned short)ans[20] | ((unsigned short)ans[21] << 8);
+    glob_lfn_find[slot].fpos  = (unsigned short)ans[22] | ((unsigned short)ans[23] << 8);
+    glob_lfn_find[slot].inuse = 1;
+    glob_lfn_find[slot].drv = glob_lfn_drv;
+    if (glob_lfn_op == AL_LFN_FINDFIRST)
+      glob_intregs.w.ax = LFN_HANDLE_MAGIC | slot; /* find handle */
+    glob_intregs.w.cx = 0;                    /* Unicode-conversion flags = none */
+    glob_intregs.w.flags &= ~INTR_CF;
+  } else {                                    /* no more files / timeout */
+    if (glob_lfn_op == AL_LFN_FINDFIRST) glob_lfn_find[slot].inuse = 0;
+    glob_intregs.w.ax = 0x12;                 /* ERROR_NO_MORE_FILES */
+    glob_intregs.w.flags |= INTR_CF;
+  }
+}
+/* ========================================================================== */
 
 
 /* This function is hooked on INT 21h. It is RESIDENT (defined before
@@ -1226,10 +1408,157 @@ void __interrupt __far inthandler21(union INTPACK r) {
     }
   }
   if (r.h.ah == 0x71) {
-    /* increment 2: service LFN subfunctions for our drive(s) here */
-    ;
+    unsigned char do_lfn = 0; /* set to 1 to run the guarded server round-trip */
+    if (r.h.al == 0xA0) { /* 71A0h GET VOLUME INFO -- advertise LFN locally */
+      unsigned char far *rp = MK_FP(r.w.ds, r.w.dx); /* ASCIZ "X:\" */
+      unsigned char idx = 0xff;
+      if ((rp[0] != 0) && (rp[1] == ':')) idx = DRIVETONUM(rp[0]);
+      if ((idx <= 25) && (glob_data.ldrv[idx] != 0xff)) {
+        if (r.w.cx >= 4) { /* ES:DI file-system name "EDF5" */
+          unsigned char far *fsn = MK_FP(r.w.es, r.w.di);
+          fsn[0] = 'E'; fsn[1] = 'D'; fsn[2] = 'F'; fsn[3] = '5';
+          if (r.w.cx > 4) fsn[4] = 0;
+        }
+        r.w.bx = 0x4002; /* bit14 supports LFN | bit1 preserves case */
+        r.w.cx = 255;    /* max filename component length */
+        r.w.dx = 260;    /* max path length */
+        r.w.flags &= ~INTR_CF;
+        return;          /* handled locally, no server round-trip */
+      }
+    } else if (r.h.al == 0x4E) { /* 714Eh FindFirstFile */
+      unsigned char far *pp = MK_FP(r.w.ds, r.w.dx); /* ASCIZ search path */
+      unsigned char idx = 0xff, s;
+      if ((pp[0] != 0) && (pp[1] == ':')) idx = DRIVETONUM(pp[0]);
+      if ((idx <= 25) && (glob_data.ldrv[idx] != 0xff)) { /* our drive */
+        for (s = 0; s < LFN_FINDMAX; s++) if (glob_lfn_find[s].inuse == 0) break;
+        if (s >= LFN_FINDMAX) { /* find table full */
+          r.w.ax = 0x12; r.w.flags |= INTR_CF; return;
+        }
+        glob_lfn_slot = s;
+        glob_lfn_drv = idx;
+        glob_lfn_find[s].attr = r.h.cl; /* allowable-attribute mask */
+        glob_lfn_op = AL_LFN_FINDFIRST;
+        do_lfn = 1;
+      }
+    } else if (r.h.al == 0x4F) { /* 714Fh FindNextFile */
+      if ((r.w.bx & 0xff00u) == LFN_HANDLE_MAGIC) {
+        unsigned char s = (unsigned char)(r.w.bx & 0xff);
+        if ((s < LFN_FINDMAX) && (glob_lfn_find[s].inuse != 0)) { /* our handle */
+          glob_lfn_slot = s;
+          glob_lfn_drv = glob_lfn_find[s].drv;
+          glob_lfn_op = AL_LFN_FINDNEXT;
+          do_lfn = 1;
+        }
+      }
+    } else if (r.h.al == 0xA1) { /* 71A1h FindClose */
+      if ((r.w.bx & 0xff00u) == LFN_HANDLE_MAGIC) {
+        unsigned char s = (unsigned char)(r.w.bx & 0xff);
+        if ((s < LFN_FINDMAX) && (glob_lfn_find[s].inuse != 0)) {
+          glob_lfn_find[s].inuse = 0;
+          r.w.flags &= ~INTR_CF; /* success */
+          return;
+        }
+      }
+    } else if (r.h.al == 0xA7) { /* 71A7h FILETIME <-> DOS date/time */
+      /* NOT drive-specific: a pure calendar conversion (see ftconv.h). LFN
+       * shells (4DOS) convert our FindData FILETIMEs for display with BL=0;
+       * without this, the call chains to a non-LFN DOS kernel, fails, and the
+       * DIR date/time columns stay blank. Pure local math -- no server
+       * round-trip, no stack switch (scalars live on the caller stack; the
+       * multi-word state is in resident DS statics). */
+      if (r.h.bl == 0) { /* FileTimeToDosDateTime: DS:SI -> 8-byte FILETIME */
+        unsigned char far *src = MK_FP(r.w.ds, r.w.si);
+        unsigned short k;
+        int rc;
+        if (ftc_busy) { /* nested conversion would break the DIV precondition */
+          r.w.ax = 0x000d; r.w.flags |= INTR_CF; return;
+        }
+        ftc_busy = 1;
+        for (k = 0; k < 4; k++)
+          ftc_w[k] = (unsigned short)src[k + k] | ((unsigned short)src[k + k + 1] << 8);
+        rc = ftc_ft2dos();
+        if (rc == 0) {
+          r.w.dx = ftc_dosdate;
+          r.w.cx = ftc_dostime;
+          r.h.bh = ftc_bh;       /* hundredths (incl. odd second: +100) */
+          r.w.flags &= ~INTR_CF;
+        } else {
+          r.w.ax = 0x000d;       /* ERROR_INVALID_DATA (zero/out of range) */
+          r.w.flags |= INTR_CF;
+        }
+        ftc_busy = 0;
+        return;
+      }
+      if (r.h.bl == 1) { /* DosDateTimeToFileTime: DX=date CX=time -> ES:DI.
+                          * NOTE: the RBIL-specified BH hundredths input is
+                          * ignored (DOS times are 2-second granular anyway). */
+        int rc;
+        if (ftc_busy) {
+          r.w.ax = 0x000d; r.w.flags |= INTR_CF; return;
+        }
+        ftc_busy = 1;
+        ftc_dosdate = r.w.dx;
+        ftc_dostime = r.w.cx;
+        rc = ftc_dos2ft();
+        if (rc == 0) {
+          unsigned char far *dst = MK_FP(r.w.es, r.w.di);
+          unsigned short k;
+          for (k = 0; k < 4; k++) {
+            dst[k + k] = (unsigned char)(ftc_w[k] & 0xff);
+            dst[k + k + 1] = (unsigned char)(ftc_w[k] >> 8);
+          }
+          r.w.flags &= ~INTR_CF;
+        } else {
+          r.w.ax = 0x000d;
+          r.w.flags |= INTR_CF;
+        }
+        ftc_busy = 0;
+        return;
+      }
+      /* other BL subfunctions -> chain */
+    }
+    if (do_lfn) { /* guarded blocking server round-trip on the resident stack */
+      /* Stateless nesting guard: if SS is already DS we are nested inside an
+       * outer switched context (a 2Fh or 21h send blocked in sendquery); a
+       * second switch would clobber it, so bail without touching the stack. */
+      { volatile unsigned char _nested = 0;
+        _asm {
+          push ax
+          push bx
+          mov ax, ss
+          mov bx, ds
+          cmp ax, bx
+          jne n21ok
+          mov byte ptr _nested, 1
+        n21ok:
+          pop bx
+          pop ax
+        }
+        if (_nested != 0) { r.w.ax = 0x0005; r.w.flags |= INTR_CF; return; }
+      }
+      copybytes(&glob_intregs, &r, sizeof(union INTPACK));
+      _asm {
+        cli
+        mov glob_o21ss, SS
+        mov glob_o21sp, SP
+        mov ax, ds
+        mov ss, ax
+        mov sp, DATASEGSZ-2
+        sti
+      }
+      lfn_do_find();
+      _asm {
+        cli
+        mov SS, glob_o21ss
+        mov SP, glob_o21sp
+        sti
+      }
+      copybytes(&r, &glob_intregs, sizeof(union INTPACK));
+      return;
+    }
+    /* other 71xx, or not our drive/handle -> chain */
   }
-  /* chain everything (for now, including 71h) to the previous handler */
+  /* chain everything else to the previous handler */
   _mvchain_intr(MK_FP(glob_data.prev_21_handler_seg, glob_data.prev_21_handler_off));
 }
 
@@ -1664,17 +1993,21 @@ static int updatetsrds(void) {
     pop newds
   }
 
-  /* first patch the TSR routine */
-  ptr = (unsigned char far *)inthandler + 24; /* the interrupt handler's signature appears at offset 23 (this might change at each source code modification and/or optimization settings) */
-  /*{
-    int x;
-    unsigned short far *VGA = (unsigned short far *)(0xB8000000l);
-    for (x = 0; x < 128; x++) VGA[80*12 + ((x >> 6) * 80) + (x & 63)] = 0x1f00 | ptr[x];
-  }*/
-  sptr = (unsigned short far *)ptr;
-  /* check for the routine's signature first ("MVet") */
-  if ((ptr[0] != 'M') || (ptr[1] != 'V') || (ptr[2] != 'e') || (ptr[3] != 't')) return(-1);
-  sptr[3] = newds;
+  /* first patch the TSR routine. Like inthandler21 below, SCAN for the "MVet"
+   * signature instead of relying on a hardcoded offset: the signature's offset
+   * shifts whenever the function's locals/prologue change (a hardcoded +24
+   * broke -- "DS/SS relocation failed" -- when a local was added). The
+   * 'mov ax,IMM16' DS immediate sits 6 bytes past the signature start. */
+  {
+    unsigned short i;
+    ptr = (unsigned char far *)inthandler;
+    for (i = 0; i < 96; i++) {
+      if ((ptr[i] == 'M') && (ptr[i + 1] == 'V') && (ptr[i + 2] == 'e') && (ptr[i + 3] == 't')) break;
+    }
+    if (i >= 96) return(-1); /* signature not found */
+    sptr = (unsigned short far *)(ptr + i);
+    sptr[3] = newds;
+  }
   /* now patch the pktdrv_recv() routine */
   ptr = (unsigned char far *)pktdrv_recv + 3;
   sptr = (unsigned short far *)ptr;
@@ -2053,6 +2386,10 @@ int main(int argc, char **argv) {
 
   /* copy current DS into the new segment and switch to new DS/SS */
   _asm {
+    /* remember the original DS first (written before the copy below, so the
+     * value lands in both copies) -- failure paths switch back to it */
+    push ds
+    pop glob_origds
     /* save registers on the stack */
     push es
     push cx
@@ -2084,6 +2421,21 @@ int main(int argc, char **argv) {
 
   /* patch the TSR and pktdrv_recv() so they use my new DS */
   if (updatetsrds() != 0) {
+    /* switch SS/DS BACK to the original segment before freeing the new one:
+     * our stack currently lives in newdataseg (identical copy, same SP), and
+     * freeing the segment under our own SS then returning = freed-stack use
+     * (hang / EMM386 #12 stack fault). glob_origds was written before the
+     * segment copy, so both copies hold it; everything main() later pops on
+     * return was pushed before the copy too, so the original stack is valid.
+     * push mem/pop sreg avoids clobbering any register across the switch. */
+    _asm {
+      cli
+      push glob_origds
+      pop ds
+      push glob_origds
+      pop ss
+      sti
+    }
     #include "msg\\relfail.c"
     freeseg(newdataseg);
     return(1);

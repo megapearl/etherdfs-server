@@ -16,8 +16,20 @@
  * of several hundreds bytes at least - 1K should be safe... It is important
  * that DATASEGSZ can contain a stack of AT LEAST the size of the stack used
  * by the transient code, since the transient part of the program will switch
- * to it and expects the stack to not become corrupted in the process */
-#define DATASEGSZ 3500
+ * to it and expects the stack to not become corrupted in the process.
+ *
+ * CRITICAL: DATASEGSZ must cover the ENTIRE DGROUP *including the transient
+ * STACK segment at its top* (check the linker map: DGROUP size, STACK at the
+ * end -- currently DGROUP = 0xE30 = 3632 with STACK at 2608..3632). main()
+ * copies DATASEGSZ bytes of DGROUP into the new segment and then switches
+ * SS:SP there; any live stack bytes ABOVE the copy window (e.g. main()'s own
+ * locals such as the parsed args) arrive as garbage. With the old value 3500
+ * the top 132 stack bytes were not copied: whether that bit depended on which
+ * locals the compiler spilled there -- adding code to main() made it drop the
+ * ARGFL_AUTO flag, silently skipping server auto-discovery (mapping showed
+ * MAC 00:00:00:00:00:00). 4096 covers the whole 3632-byte DGROUP with margin
+ * and gives the resident stack more headroom (SP starts at DATASEGSZ-2). */
+#define DATASEGSZ 4096
 
 /* a few globals useful only for debug messages */
 #if DEBUGLEVEL > 0
@@ -79,6 +91,39 @@ static unsigned char glob_multiplexid;
 
 /* an INTPACK structure used to store registers as set when INT2F is called */
 static union INTPACK glob_intregs;
+
+/* --- LFN (long filename) client state (Phase-2 increment 2) --- */
+#define LFN_FINDMAX 4        /* concurrent FindFirst/Next searches */
+#define LFN_HANDLE_MAGIC 0xEF00u /* our find handles are 0xEF00|slot (avoids
+                                  * collision with DOSLFN's handles) */
+struct lfnfindslot {
+  unsigned char inuse;
+  unsigned char drv;         /* 0-based local drive index */
+  unsigned short dirss;      /* server search-state (cursor) */
+  unsigned short fpos;       /* server position/nth (cursor) */
+  unsigned char attr;        /* search attribute mask */
+  unsigned char tmpl[11];    /* 8.3 FCB search template (for FindNext) */
+};
+static struct lfnfindslot glob_lfn_find[LFN_FINDMAX];
+/* Reentrancy is guarded STATELESSLY (no flag that could get stuck): both the
+ * INT 2Fh handler and the INT 21h LFN send switch SS to the resident data
+ * segment (SS=DS, SP=DATASEGSZ-2) while they run. So if a handler is entered
+ * with SS ALREADY equal to DS, it is nested inside an outer switched context --
+ * switching again would reset SP and clobber the outer's stack. Such a nested
+ * handler bails/chains WITHOUT switching. (See the SS==DS checks in the code.) */
+static unsigned char glob_lfn_op = 0;    /* AL_LFN_FINDFIRST / FINDNEXT for the helper */
+static unsigned char glob_lfn_slot = 0;  /* find slot the helper operates on */
+static unsigned char glob_lfn_drv = 0;   /* 0-based drive index for the helper */
+static unsigned short glob_o21ss;         /* saved SS for the 21h-hook stack swap */
+static unsigned short glob_o21sp;         /* saved SP for the 21h-hook stack swap */
+
+/* original (program) DS, saved by main() BEFORE it switches DS/SS to the newly
+ * allocated resident segment. Because it is written before the segment copy, it
+ * is present in both copies. Install-failure paths MUST switch SS/DS back to
+ * this segment BEFORE freeing the new one: freeing the segment your own SS
+ * points into and then returning runs on freed stack memory (that exact bug
+ * hung the machine / stack-faulted EMM386 #12 when a relocation check failed). */
+static unsigned short glob_origds;
 
 
 #endif

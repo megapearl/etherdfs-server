@@ -35,3 +35,19 @@ printf XXXX>readme.txt; printf YY>a_long_document_name.txt; printf Z>mixedcase.t
 
 echo; echo "########## WIRE / process() TEST (ethersrv.c) ##########"
 /tmp/test_proto "$FIX"
+
+cd "$(dirname "$0")/.."  # back to repo root
+
+echo; echo "########## FTCONV TEST (client 71A7h date math, host build) ##########"
+gcc tests/test_ftconv.c -o /tmp/test_ftconv -O2 -Wall -Iclient/src
+/tmp/test_ftconv
+
+echo; echo "########## MASK-IDENTITY FUZZ (client lfn_leaf2fcb == server lfn_mask2fcb) ##########"
+# extract the REAL implementations from both trees so drift fails the build
+awk '/^static unsigned char lfn_upc/,/^}/'   client/src/ETHERDFS.C  > /tmp/maskcmp_gen.c
+awk '/^static void lfn_leaf2fcb/,/^}/'       client/src/ETHERDFS.C >> /tmp/maskcmp_gen.c
+awk '/^void filename2fcb/,/^}/'              fs.c                   > /tmp/maskcmp_srv.c
+awk '/^static void lfn_mask2fcb/,/^}/'       ethersrv.c            >> /tmp/maskcmp_srv.c
+cp tests/test_maskcmp.c /tmp/
+gcc /tmp/test_maskcmp.c -o /tmp/test_maskcmp -O2 -I/tmp
+/tmp/test_maskcmp
