@@ -273,6 +273,58 @@ static int matchfile2mask(char *msk, const char *fil) {
   return (0);
 }
 
+/* render an 11-byte FCB name ("MYLONGFITXT") as a display name
+ * ("MYLONGFI.TXT", ASCIZ, d must hold 13 bytes) for long-mask matching */
+static void fcb2display(char *d, const char *fcb) {
+  int i, k = 0;
+  for (i = 0; i < 8; i++) {
+    if (fcb[i] == ' ')
+      break;
+    d[k++] = fcb[i];
+  }
+  if (fcb[8] != ' ') {
+    d[k++] = '.';
+    for (i = 8; i < 11; i++) {
+      if (fcb[i] == ' ')
+        break;
+      d[k++] = fcb[i];
+    }
+  }
+  d[k] = 0;
+}
+
+/* Win95-style wildcard match of an LFN mask against a LONG filename:
+ * case-insensitive, '?' matches exactly one character, '*' matches any run of
+ * characters INCLUDING dots (RBIL, INT 21h/AX=714Eh). Callers normalize a
+ * whole-mask "*.*" to "*" beforehand (Win95: "*.*" == "*" == everything).
+ * Returns 0 on match, non-zero otherwise. Iterative two-pointer backtracking
+ * (O(n*m)) so adversarial wire masks cannot blow the stack or the clock. */
+static int matchlfn2mask(const char *msk, const char *fil) {
+  const char *m = msk, *f = fil;
+  const char *star_m = NULL, *star_f = NULL;
+  for (;;) {
+    if (*f == 0) {
+      while (*m == '*')
+        m++;
+      return ((*m == 0) ? 0 : -1);
+    }
+    if ((*m == '?') || (upchar(*m) == upchar(*f))) {
+      m++;
+      f++;
+    } else if (*m == '*') {
+      star_m = m;
+      m++;
+      star_f = f;
+    } else if (star_m != NULL) {
+      m = star_m + 1;
+      star_f++;
+      f = star_f;
+    } else {
+      return (-1);
+    }
+  }
+}
+
 /* provides DOS-like attributes for item i, as well as size, filling fprops
  * accordingly. returns item's attributes or 0xff on error.
  * DOS attr flags: 1=RO 2=HID 4=SYS 8=VOL 16=DIR 32=ARCH 64=DEVICE */
@@ -537,10 +589,15 @@ static long gendirlist(struct sfsdb *root, unsigned char fatflag,
  * (dss is the starting sector of the directory, as obtained via getitemss) with
  * AT MOST attributes attr, fills 'out' with the nth match. returns 0 on
  * success, non-zero otherwise. *nth is updated with the nth id of the file that
- * matched */
+ * matched.
+ * lfnmask: optional Win95-style long-name mask (NULL for the legacy 8.3
+ * opcodes). When set, an entry matches if EITHER its 8.3 name matches fcbtmpl
+ * OR its long name matches lfnmask (Win95 FindFirstFile matches either name);
+ * this is what lets an exact long leaf like "Games List.txt" (whose naive
+ * FCB-ization differs from its ~N/stripped SFN alias) be found at all. */
 int findfile(struct fileprops *f, unsigned short dss, char *fcbtmpl,
-             unsigned char attr, unsigned short *nth, int flags,
-             const char *vollabel, char *out_lfn) {
+             const char *lfnmask, unsigned char attr, unsigned short *nth,
+             int flags, const char *vollabel, char *out_lfn) {
   int n = 0;
   struct sdirlist *dirlist;
   if (out_lfn != NULL) /* define it on every return path, incl. early errors */
@@ -586,9 +643,23 @@ int findfile(struct fileprops *f, unsigned short dss, char *fcbtmpl,
     /* skip '.' and '..' items if directory is root */
     if ((dirlist->fprops.fcbname[0] == '.') && (flags & FFILE_ISROOT))
       continue;
-    /* if no match, continue */
-    if (matchfile2mask(fcbtmpl, dirlist->fprops.fcbname) != 0)
-      continue;
+    /* if no match, continue. With an LFN mask present (LFN opcodes from a
+     * new client), Win95 semantics apply: the mask glob-matches against
+     * EITHER name form (long name or displayed 8.3 alias). The FCB template
+     * cannot express mid-name '*' (it expands to all-'?', matching
+     * everything), so it is NOT consulted in that mode -- it remains the
+     * matcher for the legacy 8.3 opcodes and old-client FindNext requests. */
+    if (lfnmask != NULL) {
+      char sfndisp[13];
+      fcb2display(sfndisp, dirlist->fprops.fcbname);
+      if ((matchlfn2mask(lfnmask, sfndisp) != 0) &&
+          ((dirlist->lfn_name[0] == 0) ||
+           (matchlfn2mask(lfnmask, dirlist->lfn_name) != 0)))
+        continue;
+    } else {
+      if (matchfile2mask(fcbtmpl, dirlist->fprops.fcbname) != 0)
+        continue;
+    }
     /* do attributes match?
        DOS attribs: 1=RO 2=HID 4=SYS 8=VOL 16=DIR 32=ARCH 64=DEV */
     if (attr == 0x08) { /* I want VOL */

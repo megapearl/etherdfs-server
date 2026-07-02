@@ -533,7 +533,7 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
       flags |= FFILE_ISFAT;
     dirss = getitemss(directory);
     if ((dirss == 0xffffu) ||
-        (findfile(&fprops, dirss, filemaskfcb, fattr, &fpos, flags,
+        (findfile(&fprops, dirss, filemaskfcb, NULL, fattr, &fpos, flags,
                   custom_vol_label, NULL) != 0)) {
       DBG("No matching file found\n");
       *ax = 0x12; /* 0x12 is "no more files" -- one would assume 0x02 "file not
@@ -578,8 +578,8 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
       flags |= FFILE_ISROOT;
     if (drivesfat[reqdrv] != 0)
       flags |= FFILE_ISFAT;
-    if (findfile(&fprops, dirss, fcbmask, fattr, &fpos, flags, custom_vol_label,
-                 NULL)) {
+    if (findfile(&fprops, dirss, fcbmask, NULL, fattr, &fpos, flags,
+                 custom_vol_label, NULL)) {
       DBG("No more matching files found\n");
       *ax = 0x12; /* "no more files" */
     } else {      /* found a file */
@@ -1016,6 +1016,10 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
     } else {
       explodepath(dirpart, leafmask, dlfn, (int)strlen(dlfn));
       resolve_path(resolved, root, dirpart);
+      /* Win95: a whole-mask "*.*" means "everything", same as "*" -- normalize
+       * so the long-name matcher (which treats '.' literally) agrees */
+      if (strcmp(leafmask, "*.*") == 0)
+        strcpy(leafmask, "*");
       lfn_mask2fcb(filemaskfcb, leafmask);
       DBG("LFN_FINDFIRST in '%s' mask '%s'\n", resolved, leafmask);
       flags = 0;
@@ -1025,8 +1029,8 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
         flags |= FFILE_ISFAT;
       dirss = getitemss(resolved);
       if ((dirss == 0xffffu) ||
-          (findfile(&fprops, dirss, filemaskfcb, fattr, &fpos, flags,
-                    custom_vol_label, foundlfn) != 0)) {
+          (findfile(&fprops, dirss, filemaskfcb, leafmask, fattr, &fpos,
+                    flags, custom_vol_label, foundlfn) != 0)) {
         *ax = 0x12; /* no more files */
       } else {
         reslen = lfn_fill_resp(answ, &fprops, dirss, fpos, 0, foundlfn);
@@ -1036,19 +1040,33 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
     unsigned char fattr = reqbuff[4];
     char *fcbmask = (char *)reqbuff + 5;
     char foundlfn[256];
+    char lfnmaskbuf[260];
+    const char *lfnmask = NULL;
     struct fileprops fprops;
     unsigned short dirss, fpos;
     int flags;
     dirss = le16toh(wreqbuff[0]);
     fpos = le16toh(wreqbuff[1]);
+    /* OPTIONAL additive tail (new clients): LFNSTR long-name mask at [16..],
+     * so FindNext matches long names exactly like FindFirst. Old clients send
+     * exactly 16 bytes -> lfnmask stays NULL -> SFN-template-only (previous
+     * behavior). lfnstr_get bounds-checks the declared length. */
+    if ((reqbufflen >= 19) &&
+        (lfnstr_get(reqbuff + 16, reqbufflen - 16, lfnmaskbuf,
+                    sizeof(lfnmaskbuf)) == 0) &&
+        (lfnmaskbuf[0] != 0)) {
+      if (strcmp(lfnmaskbuf, "*.*") == 0)
+        strcpy(lfnmaskbuf, "*");
+      lfnmask = lfnmaskbuf;
+    }
     DBG("LFN_FINDNEXT nth %u in dir #%u\n", fpos, dirss);
     flags = 0;
     if (isroot(root, sstoitem(dirss)) != 0)
       flags |= FFILE_ISROOT;
     if (drivesfat[reqdrv] != 0)
       flags |= FFILE_ISFAT;
-    if (findfile(&fprops, dirss, fcbmask, fattr, &fpos, flags, custom_vol_label,
-                 foundlfn) != 0) {
+    if (findfile(&fprops, dirss, fcbmask, lfnmask, fattr, &fpos, flags,
+                 custom_vol_label, foundlfn) != 0) {
       *ax = 0x12;
     } else {
       reslen = lfn_fill_resp(answ, &fprops, dirss, fpos, 0, foundlfn);

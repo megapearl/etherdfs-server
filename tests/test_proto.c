@@ -175,6 +175,71 @@ int main(int argc, char **argv) {
     printf("  OK: mask \"*\" matched file(s) with extensions\n");
   }
 
+  printf("=== exact long-name matching (Win95: names with spaces/~N aliases) ===\n");
+  /* Regression: an exact long leaf whose FCB-ization differs from its SFN
+   * alias ("my long file.txt" FCB-izes to "MY LONG TXT" but its alias strips
+   * the spaces) was UNFINDABLE before the long-name-OR-SFN predicate. The
+   * 716Ch open path resolves aliases through exactly this query. */
+  {
+    int hit = 0;
+    pl[0] = 0x37;
+    n = 1 + put_lfnstr(pl + 1, "\\my long file.txt");
+    memset(&ans, 0, sizeof(ans));
+    reqlen = build_req(frame, 0x41, pl, n);
+    rc = process(&ans, frame, reqlen, mymac, rootarray);
+    show_resp("FF-exact-spaces", ans.frame, rc);
+    if ((ans.frame[58] | (ans.frame[59] << 8)) != 0) {
+      printf("  FAIL: exact long name with spaces not found\n");
+      return (1);
+    }
+    /* wildcard over the long name: "*file*" must find it too (old code
+     * FCB-ized this to all-'?' and could false-match anything; now it must
+     * match the long name properly) */
+    pl[0] = 0x37;
+    n = 1 + put_lfnstr(pl + 1, "\\*long f*");
+    memset(&ans, 0, sizeof(ans));
+    reqlen = build_req(frame, 0x41, pl, n);
+    rc = process(&ans, frame, reqlen, mymac, rootarray);
+    show_resp("FF-wild-long", ans.frame, rc);
+    if ((ans.frame[58] | (ans.frame[59] << 8)) != 0) {
+      printf("  FAIL: wildcard '*long f*' did not match the long name\n");
+      return (1);
+    }
+    /* FINDNEXT with the OPTIONAL LFNSTR mask tail: enumerate "*file*" and
+     * count matches -- must include both my-long-file and the .diz set's
+     * file_id files (long-name matching), then terminate cleanly */
+    pl[0] = 0x37;
+    n = 1 + put_lfnstr(pl + 1, "\\*file*");
+    memset(&ans, 0, sizeof(ans));
+    reqlen = build_req(frame, 0x41, pl, n);
+    rc = process(&ans, frame, reqlen, mymac, rootarray);
+    dirss = ans.frame[60 + 20] | (ans.frame[60 + 21] << 8);
+    fpos = ans.frame[60 + 22] | (ans.frame[60 + 23] << 8);
+    while ((ans.frame[58] | (ans.frame[59] << 8)) == 0) {
+      hit++;
+      pl[0] = dirss & 0xff;
+      pl[1] = (dirss >> 8) & 0xff;
+      pl[2] = fpos & 0xff;
+      pl[3] = (fpos >> 8) & 0xff;
+      pl[4] = 0x37;
+      memset(pl + 5, '?', 11);
+      n = 16 + put_lfnstr(pl + 16, "*file*"); /* the additive mask tail */
+      memset(&ans, 0, sizeof(ans));
+      reqlen = build_req(frame, 0x42, pl, n);
+      rc = process(&ans, frame, reqlen, mymac, rootarray);
+      if ((ans.frame[58] | (ans.frame[59] << 8)) != 0) break;
+      show_resp("FN-wild-long", ans.frame, rc);
+      fpos = ans.frame[60 + 22] | (ans.frame[60 + 23] << 8);
+      if (hit > 30) { printf("  FAIL: runaway enumeration\n"); return (1); }
+    }
+    if (hit != 4) { /* file_id{,_long,_other}.diz + "my long file.txt";
+                     * NOT readme.txt/mixedcase.txt (Win95 glob, no FCB leg) */
+      printf("  FAIL: '*file*' matched %d entries (expect exactly 4)\n", hit);
+      return (1);
+    }
+    printf("  OK: exact + wildcard long-name matching (%d '*file*' hits)\n", hit);
+  }
+
   printf("=== AL_LFN_CREATE (0x44) a 9-char-base long file ===\n");
   pl[0] = 0x20; /* cattr archive */
   pl[1] = 0x00;

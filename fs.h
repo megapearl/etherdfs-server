@@ -53,10 +53,12 @@ int setitemattr(char *i, unsigned char fattr);
 /* searches for file matching template tmpl in directory dss (dss is the
  * starting sector of the directory, as obtained via getitemss) with attribute
  * attr, fills 'out' with the nth match. returns 0 on success, non-zero
- * otherwise. */
+ * otherwise. lfnmask: optional Win95-style long-name mask (NULL = legacy 8.3
+ * behavior); when set, an entry matches if its 8.3 name matches fcbtmpl OR its
+ * long name matches lfnmask. */
 int findfile(struct fileprops *f, unsigned short dss, char *fcbtmpl,
-             unsigned char attr, unsigned short *nth, int flags,
-             const char *vollabel, char *out_lfn);
+             const char *lfnmask, unsigned char attr, unsigned short *nth,
+             int flags, const char *vollabel, char *out_lfn);
 
 /* computes the deterministic 8.3 SFN alias that target_lfn has (or would get)
  * inside dir_path, matching exactly what gendirlist()/resolve_sfn_in_dir()

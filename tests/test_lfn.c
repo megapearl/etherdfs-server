@@ -25,7 +25,7 @@ int main(int argc, char **argv) {
   dss = getitemss((char *)dir);
   printf("== FindFirst/FindNext enumeration of '%s' (dss=%u) ==\n", dir, dss);
   printf("  %-13s %-5s %-12s  consistency\n", "LONG NAME", "ATTR", "SFN(FCB)");
-  while (findfile(&fp, dss, "???????????", 0x37, &nth, 0, "", lfn) == 0) {
+  while (findfile(&fp, dss, "???????????", NULL, 0x37, &nth, 0, "", lfn) == 0) {
     /* re-derive the SFN alias independently and confirm it matches */
     const char *cmp = "n/a";
     if (lfn[0] != 0 && strcmp(lfn, ".") != 0 && strcmp(lfn, "..") != 0) {
