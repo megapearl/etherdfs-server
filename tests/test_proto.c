@@ -361,8 +361,45 @@ int main(int argc, char **argv) {
       printf("  FAIL: rename onto existing target did not return AX=5\n");
       return (1);
     }
+    /* (h) isroot regression: an EMPTY first-level subdirectory must still
+     * list its synthetic '.' and '..' entries (both DIR). Before the isroot
+     * fix a first-level subdir was misclassified as root, stripping '.'/'..',
+     * so an empty one returned "no more files" (DOS "File not found"). */
+    {
+      unsigned short dss, fp2;
+      int dircnt = 0;
+      pl[0] = 0x37;
+      n = 1 + put_lfnstr(pl + 1, "\\emptydir\\*");
+      memset(&ans, 0, sizeof(ans));
+      reqlen = build_req(frame, 0x41, pl, n);
+      rc = process(&ans, frame, reqlen, mymac, rootarray);
+      show_resp("FF-emptydir", ans.frame, rc);
+      if ((ans.frame[58] | (ans.frame[59] << 8)) != 0) {
+        printf("  FAIL: empty first-level subdir listed nothing (isroot bug)\n");
+        return (1);
+      }
+      if ((ans.frame[60] & 0x10) != 0) dircnt++;
+      dss = ans.frame[60 + 20] | (ans.frame[60 + 21] << 8);
+      fp2 = ans.frame[60 + 22] | (ans.frame[60 + 23] << 8);
+      /* FINDNEXT to collect the second dot-entry */
+      pl[0] = dss & 0xff; pl[1] = (dss >> 8) & 0xff;
+      pl[2] = fp2 & 0xff; pl[3] = (fp2 >> 8) & 0xff;
+      pl[4] = 0x37;
+      memset(pl + 5, '?', 11);
+      memset(&ans, 0, sizeof(ans));
+      reqlen = build_req(frame, 0x42, pl, 16);
+      rc = process(&ans, frame, reqlen, mymac, rootarray);
+      if (((ans.frame[58] | (ans.frame[59] << 8)) == 0) &&
+          ((ans.frame[60] & 0x10) != 0))
+        dircnt++;
+      if (dircnt < 2) {
+        printf("  FAIL: empty subdir did not return '.' and '..' (got %d)\n",
+               dircnt);
+        return (1);
+      }
+    }
     (void)hits;
-    printf("  OK: long parents, truename round-trip, mkdir-long, rename-long\n");
+    printf("  OK: long parents, truename round-trip, mkdir-long, rename-long, dotdirs\n");
   }
 
   printf("=== AL_LFN_CREATE (0x44) a 9-char-base long file ===\n");

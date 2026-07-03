@@ -36,6 +36,7 @@ printf XXXX>readme.txt; printf YY>a_long_document_name.txt; printf Z>mixedcase.t
 printf W>"my long file.txt"
 mkdir -p "Long Dir Name"
 printf N>"Long Dir Name/nested long file.txt"
+mkdir -p emptydir   # empty first-level subdir (isroot . / .. regression)
 
 echo; echo "########## WIRE / process() TEST (ethersrv.c) ##########"
 /tmp/test_proto "$FIX"

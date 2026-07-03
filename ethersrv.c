@@ -205,22 +205,21 @@ static int isroot(char *root, char *dir) {
    * report 'no more files' for the missing slot. */
   if ((root == NULL) || (dir == NULL))
     return (0);
-  /* fast-forward to the 'virtual directory' part */
+  /* fast-forward past the shared root prefix */
   while ((*root != 0) && (*dir != 0)) {
     root++;
     dir++;
   }
-  /* skip any leading / */
+  /* skip any leading / left on the directory tail */
   while (*dir == '/')
     dir++;
-  /* is there any subsequent '/' ? if so, then it's not root */
-  while (*dir != 0) {
-    if (*dir == '/')
-      return (0);
-    dir++;
-  }
-  /* otherwise it's root */
-  return (1);
+  /* If ANYTHING remains after the root prefix (and its slash), this is a
+   * subdirectory -- root iff the tail is empty. The previous version only
+   * treated a tail CONTAINING a further '/' as non-root, which wrongly
+   * classified every first-level subdir ("<root>/uploads" -> tail "uploads",
+   * no slash) as root and thus stripped its '.'/'..' entries -- making an
+   * empty first-level subdir list as zero items ("File not found"). */
+  return ((*dir == 0) ? 1 : 0);
 }
 
 /* explode a full X:\DIR\FILE????.??? search path into directory and mask */
