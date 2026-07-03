@@ -994,17 +994,30 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
     answ[2] = 0x07; /* feature bitmap LE: bit0 find, bit1 open/create, bit2 volinfo */
     answ[3] = 0x00;
     reslen = 4;
-  } else if ((query == AL_LFN_TRUENAME) && (reqbufflen >= 4)) { /* 0x4D */
+  } else if ((query == AL_LFN_TRUENAME) && (reqbufflen >= 3)) { /* 0x4D */
     /* req: [0] = subfunction (1 = long path -> full 8.3-alias path, matching
      * 7160h CL=1 ; 2 = alias/mixed path -> real long path, CL=2), then LFNSTR
      * path. resp: u16 LE length + path bytes. Powers the client's 7160h and
      * every truename+classic-pass-down operation (del/rd/cd/attrib and the
-     * 716Ch open path with long parents). */
+     * 716Ch open path with long parents).
+     * NOTE: the minimum payload is 3 bytes (subfn + a 2-byte LFNSTR length of
+     * zero); a caller canonicalizing a bare "X:" sends an EMPTY path. Guarding
+     * on >=4 dropped that frame into the terminal else -> return(-1) -> NO
+     * reply -> the client hangs and DOS raises INT 24h "cannot read drive"
+     * (Norton Commander opening a drive hit exactly this). Accept >=3 and map
+     * an empty path to the root. */
     unsigned char subfn = reqbuff[0];
     char dlfn[260], outp[300];
     DBG("LFN_TRUENAME subfn %u\n", subfn);
     if (lfnstr_get(reqbuff + 1, reqbufflen - 1, dlfn, sizeof(dlfn)) != 0) {
       *ax = 3;
+    } else if (dlfn[0] == 0) {
+      /* empty path (bare drive) -> canonical root */
+      answ[0] = 1;
+      answ[1] = 0;
+      answ[2] = '\\';
+      reslen = 3;
+      DBG("LFN_TRUENAME (empty) -> '\\'\n");
     } else if ((subfn != 1) && (subfn != 2)) {
       *ax = 1;
     } else {

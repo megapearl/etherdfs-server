@@ -398,8 +398,35 @@ int main(int argc, char **argv) {
         return (1);
       }
     }
+    /* (i) empty-path TRUENAME (bare "X:" -> caller strips to len 0). Must NOT
+     * be dropped (-1); must return the canonical root "\\". This is the exact
+     * frame Norton Commander sends when opening a drive; the old >=4 guard let
+     * it fall through to return(-1) -> no reply -> INT 24h "cannot read drive". */
+    {
+      unsigned char ep[4];
+      int r2;
+      ep[0] = 2;      /* subfn 2 (alias -> long) */
+      ep[1] = 0;      /* LFNSTR length = 0 (empty path) */
+      ep[2] = 0;
+      memset(&ans, 0, sizeof(ans));
+      reqlen = build_req(frame, 0x4D, ep, 3);
+      r2 = process(&ans, frame, reqlen, mymac, rootarray);
+      if (r2 <= 0) {
+        printf("  FAIL: empty-path TRUENAME dropped (rc=%d) -- NC 'cannot read drive'\n", r2);
+        return (1);
+      }
+      if ((ans.frame[58] | (ans.frame[59] << 8)) != 0) {
+        printf("  FAIL: empty-path TRUENAME returned AX=%d\n",
+               ans.frame[58] | (ans.frame[59] << 8));
+        return (1);
+      }
+      if (((ans.frame[60] | (ans.frame[61] << 8)) != 1) || (ans.frame[62] != '\\')) {
+        printf("  FAIL: empty-path TRUENAME did not return root '\\'\n");
+        return (1);
+      }
+    }
     (void)hits;
-    printf("  OK: long parents, truename round-trip, mkdir-long, rename-long, dotdirs\n");
+    printf("  OK: long parents, truename round-trip, mkdir/rename-long, dotdirs, empty-truename\n");
   }
 
   printf("=== AL_LFN_CREATE (0x44) a 9-char-base long file ===\n");
