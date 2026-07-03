@@ -60,6 +60,20 @@ int findfile(struct fileprops *f, unsigned short dss, char *fcbtmpl,
              const char *lfnmask, unsigned char attr, unsigned short *nth,
              int flags, const char *vollabel, char *out_lfn);
 
+/* Resolve one path component (long name OR 8.3 alias, case-insensitive)
+ * inside dir_path; fills out_real (>=256) and optionally out_sfn (>=14,
+ * display alias). Returns 0 on match, -1 otherwise. */
+int resolve_component(const char *dir_path, const char *wire_name,
+                      char *out_real, char *out_sfn);
+
+/* Translate a wire DOS path to its fully-aliased 8.3 form (out >= 261 bytes).
+ * Returns 0 or a DOS error (2 invalid leaf, 3 missing intermediate dir). */
+int path_to_sfn(char *out, const char *root, const char *dos_path);
+
+/* Reverse: wire DOS path -> real long component names (out >= 261 bytes).
+ * Forgiving (unmatched components pass through verbatim); returns 0. */
+int path_to_lfn(char *out, const char *root, const char *dos_path);
+
 /* computes the deterministic 8.3 SFN alias that target_lfn has (or would get)
  * inside dir_path, matching exactly what gendirlist()/resolve_sfn_in_dir()
  * assign (same sort + lfn2sfn + sequential ~N). Writes it (e.g. "FILE_I~1.DIZ")

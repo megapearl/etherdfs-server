@@ -930,8 +930,16 @@ long getfopsize(unsigned short fss) {
 /* Helper to resolve a single SFN inside a dir to its actual local name.
  * If no match is found, just copy the target string back and assume it's new.
  */
-static void resolve_sfn_in_dir(char *actual_name, const char *dir_path,
-                               const char *target_sfn) {
+/* Resolve ONE path component inside dir_path, Win95-style: the wire token is
+ * matched case-insensitively against EITHER each entry's on-disk long name OR
+ * its deterministic 8.3 alias. Aliases are generated in the same sorted order
+ * as gendirlist() (same cmp + lfn2sfn + sequential ~N), so the ~N suffixes
+ * agree with what FindFirst reports. The long-name match takes precedence.
+ * On match: returns 0, fills out_real (exact on-disk bytes, buffer >= 256)
+ * and, if out_sfn != NULL, the alias in display form ("LONGDI~1", >= 14).
+ * Returns -1 when nothing matches (the caller picks its fallback). */
+int resolve_component(const char *dir_path, const char *wire_name,
+                      char *out_real, char *out_sfn) {
   struct sfn_entry *local_sfns;
   int capacity = 1024;
   DIR *dp;
@@ -941,18 +949,16 @@ static void resolve_sfn_in_dir(char *actual_name, const char *dir_path,
   int count = 0;
   int i, j;
   int collision_found;
+  int match = -1;
 
   local_sfns = malloc(capacity * sizeof(struct sfn_entry));
-  if (local_sfns == NULL) {
-    strcpy(actual_name, target_sfn);
-    return;
-  }
+  if (local_sfns == NULL)
+    return (-1);
 
   dp = opendir(dir_path);
   if (dp == NULL) {
     free(local_sfns);
-    strcpy(actual_name, target_sfn);
-    return;
+    return (-1);
   }
 
   while ((diridx = readdir(dp)) != NULL) {
@@ -980,13 +986,13 @@ static void resolve_sfn_in_dir(char *actual_name, const char *dir_path,
    * DOS (otherwise a short name could resolve to a different real file). */
   qsort(local_sfns, (size_t)count, sizeof(struct sfn_entry), cmp_sfn_entry);
 
-  /* Now generate SFNs in order and see if we find a match */
+  /* Generate every entry's deterministic alias (the collision loop needs all
+   * earlier aliases anyway) */
   for (i = 0; i < count; i++) {
     collision_idx = 0;
     do {
       lfn2sfn(tempsfn, local_sfns[i].lfn, collision_idx);
       collision_found = 0;
-      /* Check previous SFNs generated */
       for (j = 0; j < i; j++) {
         if (strcmp(local_sfns[j].sfn, tempsfn) == 0) {
           collision_found = 1;
@@ -997,19 +1003,41 @@ static void resolve_sfn_in_dir(char *actual_name, const char *dir_path,
         break;
       collision_idx++;
     } while (collision_idx < 9999);
-
     strcpy(local_sfns[i].sfn, tempsfn);
+  }
 
-    /* Case insensitive comparison since DOS asks for upper or lower case
-     * interchangeably */
-    if (strcasecmp(tempsfn, target_sfn) == 0) {
-      strcpy(actual_name, local_sfns[i].lfn);
-      free(local_sfns);
-      return;
+  /* Pass 1: case-insensitive LONG-name match (Win95 semantics; this is what
+   * lets "\Long Dir Name\..." wire components reach the right inode even
+   * when the case differs from disk). */
+  for (i = 0; i < count; i++) {
+    if (strcasecmp(local_sfns[i].lfn, wire_name) == 0) {
+      match = i;
+      break;
+    }
+  }
+  /* Pass 2: alias match ("LONGDI~1" etc.) */
+  if (match < 0) {
+    for (i = 0; i < count; i++) {
+      if (strcasecmp(local_sfns[i].sfn, wire_name) == 0) {
+        match = i;
+        break;
+      }
     }
   }
 
+  if (match >= 0) {
+    strcpy(out_real, local_sfns[match].lfn);
+    if (out_sfn != NULL)
+      strcpy(out_sfn, local_sfns[match].sfn);
+  }
   free(local_sfns);
+  return ((match >= 0) ? 0 : -1);
+}
+
+static void resolve_sfn_in_dir(char *actual_name, const char *dir_path,
+                               const char *target_sfn) {
+  if (resolve_component(dir_path, target_sfn, actual_name, NULL) == 0)
+    return;
 
   /* Not found, just return what was asked (useful for AL_CREATE) */
   if (lowercase_mode) {
@@ -1027,15 +1055,8 @@ static void resolve_sfn_in_dir(char *actual_name, const char *dir_path,
   }
 }
 
-/* Maximum resolved-path length written back to a caller's buffer. Bounded to
- * fit the smallest buffer any caller passes (the legacy 8.3 handlers use
- * char[512]); every caller MUST therefore pass a buffer of at least this many
- * bytes. Long/deep paths are truncated (-> resolve fails cleanly) rather than
- * overflowing the caller. Ample for real DOS paths (<=260 chars). */
 #define RESOLVE_MAX 512
 
-/* resolve_path intercepts paths coming from DOS and translates SFNs back to
- * real LFNs */
 void resolve_path(char *resolved_path, const char *root, const char *dos_path) {
   char temp_path[1024];
   char current_dir[1024];
@@ -1075,6 +1096,108 @@ void resolve_path(char *resolved_path, const char *root, const char *dos_path) {
 
   /* current_dir is now < RESOLVE_MAX; safe for every caller's buffer */
   snprintf(resolved_path, RESOLVE_MAX, "%s", current_dir);
+}
+
+/* Translate a wire DOS path (long / alias / mixed components) into the
+ * equivalent fully-aliased 8.3 path (e.g. "\LONGDI~1\MYLONGFI.TXT"), for
+ * 7160h CL=1 and for the client's classic pass-downs. Walks component-wise
+ * with resolve_component(). A nonexistent LEAF is kept (uppercased) if it is
+ * its own 8.3 alias -- callers may be about to create it -- otherwise error.
+ * Returns 0 on success or a DOS error code: 2 = invalid component (leaf not
+ * representable), 3 = path not found (intermediate component missing).
+ * out must hold >= 261 bytes. */
+int path_to_sfn(char *out, const char *root, const char *dos_path) {
+  char current_dir[RESOLVE_MAX];
+  char dos_copy[520];
+  char real[256], sfn[14], tmp[14];
+  char *token, *next;
+  int outlen = 0, i;
+
+  snprintf(current_dir, sizeof(current_dir), "%s", root);
+  snprintf(dos_copy, sizeof(dos_copy), "%s", dos_path);
+  out[0] = 0;
+
+  token = dos_copy;
+  while ((*token == '\\') || (*token == '/'))
+    token++;
+  token = strtok(token, "\\/");
+  if (token == NULL) { /* root */
+    strcpy(out, "\\");
+    return (0);
+  }
+  while (token != NULL) {
+    next = strtok(NULL, "\\/");
+    if ((strcmp(token, ".") == 0) || (strcmp(token, "..") == 0)) {
+      /* pass dot-dirs through verbatim (DOS usually pre-resolves these) */
+      snprintf(real, sizeof(real), "%s", token);
+      snprintf(sfn, sizeof(sfn), "%s", token);
+    } else if (resolve_component(current_dir, token, real, sfn) != 0) {
+      if (next != NULL)
+        return (3); /* missing intermediate directory: path not found */
+      /* nonexistent leaf: acceptable only if it is its own 8.3 alias */
+      lfn2sfn(tmp, token, 0);
+      if (strcasecmp(tmp, token) != 0)
+        return (2); /* not representable as 8.3: invalid component */
+      snprintf(real, sizeof(real), "%s", token);
+      snprintf(sfn, sizeof(sfn), "%s", tmp);
+    }
+    if (outlen + (int)strlen(sfn) + 2 >= 261)
+      return (3);
+    out[outlen++] = '\\';
+    for (i = 0; sfn[i] != 0; i++)
+      out[outlen++] = sfn[i];
+    out[outlen] = 0;
+    if (strlen(current_dir) + strlen(real) + 2 < sizeof(current_dir)) {
+      strcat(current_dir, "/");
+      strcat(current_dir, real);
+    }
+    token = next;
+  }
+  return (0);
+}
+
+/* Reverse translation: wire DOS path (aliases / mixed) -> path with the REAL
+ * long component names (e.g. "\LONGDI~1\MYLONGFI.TXT" ->
+ * "\Long Dir Name\my long file.txt"), for 7160h CL=2 (display: long cwd,
+ * prompts). Forgiving: unmatched components pass through verbatim (display
+ * use; a stale alias simply shows as itself). out must hold >= 261 bytes. */
+int path_to_lfn(char *out, const char *root, const char *dos_path) {
+  char current_dir[RESOLVE_MAX];
+  char dos_copy[520];
+  char real[256];
+  char *token;
+  int outlen = 0, i;
+
+  snprintf(current_dir, sizeof(current_dir), "%s", root);
+  snprintf(dos_copy, sizeof(dos_copy), "%s", dos_path);
+  out[0] = 0;
+
+  token = dos_copy;
+  while ((*token == '\\') || (*token == '/'))
+    token++;
+  token = strtok(token, "\\/");
+  if (token == NULL) {
+    strcpy(out, "\\");
+    return (0);
+  }
+  while (token != NULL) {
+    if ((strcmp(token, ".") == 0) || (strcmp(token, "..") == 0) ||
+        (resolve_component(current_dir, token, real, NULL) != 0)) {
+      snprintf(real, sizeof(real), "%s", token); /* verbatim fallback */
+    }
+    if (outlen + (int)strlen(real) + 2 >= 261)
+      break;
+    out[outlen++] = '\\';
+    for (i = 0; real[i] != 0; i++)
+      out[outlen++] = real[i];
+    out[outlen] = 0;
+    if (strlen(current_dir) + strlen(real) + 2 < sizeof(current_dir)) {
+      strcat(current_dir, "/");
+      strcat(current_dir, real);
+    }
+    token = strtok(NULL, "\\/");
+  }
+  return (0);
 }
 
 /* Computes the deterministic 8.3 SFN alias that target_lfn has (or would get)

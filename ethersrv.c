@@ -119,6 +119,9 @@ enum AL_SUBFUNCTIONS {
   AL_LFN_FINDNEXT = 0x42,
   AL_LFN_OPEN = 0x43,
   AL_LFN_CREATE = 0x44,
+  AL_LFN_RENAME = 0x47,
+  AL_LFN_MKDIR = 0x49,
+  AL_LFN_TRUENAME = 0x4D,
   AL_LFN_VOLINFO = 0x4E,
   AL_UNKNOWN = 0xFF
 };
@@ -992,6 +995,90 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
     answ[2] = 0x07; /* feature bitmap LE: bit0 find, bit1 open/create, bit2 volinfo */
     answ[3] = 0x00;
     reslen = 4;
+  } else if ((query == AL_LFN_TRUENAME) && (reqbufflen >= 4)) { /* 0x4D */
+    /* req: [0] = subfunction (1 = long path -> full 8.3-alias path, matching
+     * 7160h CL=1 ; 2 = alias/mixed path -> real long path, CL=2), then LFNSTR
+     * path. resp: u16 LE length + path bytes. Powers the client's 7160h and
+     * every truename+classic-pass-down operation (del/rd/cd/attrib and the
+     * 716Ch open path with long parents). */
+    unsigned char subfn = reqbuff[0];
+    char dlfn[260], outp[300];
+    DBG("LFN_TRUENAME subfn %u\n", subfn);
+    if (lfnstr_get(reqbuff + 1, reqbufflen - 1, dlfn, sizeof(dlfn)) != 0) {
+      *ax = 3;
+    } else if ((subfn != 1) && (subfn != 2)) {
+      *ax = 1;
+    } else {
+      int rc = (subfn == 1) ? path_to_sfn(outp, root, dlfn)
+                            : path_to_lfn(outp, root, dlfn);
+      if (rc != 0) {
+        *ax = rc;
+      } else {
+        int n = (int)strlen(outp);
+        if (n > 260) n = 260;
+        answ[0] = (unsigned char)(n & 0xff);
+        answ[1] = (unsigned char)((n >> 8) & 0xff);
+        memcpy(answ + 2, outp, (size_t)n);
+        reslen = 2 + n;
+        DBG("LFN_TRUENAME -> '%s'\n", outp);
+      }
+    }
+  } else if ((query == AL_LFN_MKDIR) && (reqbufflen >= 3)) { /* 0x49 */
+    /* req: LFNSTR full dir path. Creates the directory under its REAL long
+     * name (a classic 39h pass-down would 8.3-mangle it). resp: AX only. */
+    char dlfn[260], dirpart[512], leaf[260], resolved[512], full[900];
+    struct stat st;
+    if (readonly_mode) {
+      *ax = 5;
+    } else if (lfnstr_get(reqbuff, reqbufflen, dlfn, sizeof(dlfn)) != 0) {
+      *ax = 3;
+    } else {
+      explodepath(dirpart, leaf, dlfn, (int)strlen(dlfn));
+      resolve_path(resolved, root, dirpart);
+      DBG("LFN_MKDIR '%s' in '%s'\n", leaf, resolved);
+      if ((leaf[0] == 0) || (stat(resolved, &st) != 0) || (!S_ISDIR(st.st_mode))) {
+        *ax = 3; /* parent path not found */
+      } else {
+        snprintf(full, sizeof(full), "%s/%s", resolved, leaf);
+        if (stat(full, &st) == 0) {
+          *ax = 5; /* already exists */
+        } else if (mkdir(full, 0777) != 0) {
+          *ax = (errno == ENOENT) ? 3 : 5;
+        }
+      }
+    }
+  } else if ((query == AL_LFN_RENAME) && (reqbufflen >= 4)) { /* 0x47 */
+    /* req: LFNSTR old path + LFNSTR new path (concatenated). Renames/moves to
+     * the REAL long target name (a classic 56h pass-down would 8.3-mangle the
+     * target). Same-drive only by construction. resp: AX only. */
+    char oldw[260], neww[260], oldfull[512];
+    char dirpart[512], leaf[260], resolved[512], newfull[900];
+    struct stat st;
+    unsigned short o1len;
+    o1len = (unsigned short)(reqbuff[0] | (reqbuff[1] << 8));
+    if (readonly_mode) {
+      *ax = 5;
+    } else if ((lfnstr_get(reqbuff, reqbufflen, oldw, sizeof(oldw)) != 0) ||
+               ((int)(2 + o1len) >= reqbufflen) ||
+               (lfnstr_get(reqbuff + 2 + o1len, reqbufflen - 2 - o1len, neww,
+                           sizeof(neww)) != 0)) {
+      *ax = 3;
+    } else {
+      resolve_path(oldfull, root, oldw);
+      explodepath(dirpart, leaf, neww, (int)strlen(neww));
+      resolve_path(resolved, root, dirpart);
+      DBG("LFN_RENAME '%s' -> '%s'/'%s'\n", oldfull, resolved, leaf);
+      if ((stat(oldfull, &st) != 0) || (leaf[0] == 0)) {
+        *ax = 2; /* source not found */
+      } else {
+        snprintf(newfull, sizeof(newfull), "%s/%s", resolved, leaf);
+        if (stat(newfull, &st) == 0) {
+          *ax = 5; /* target exists: DOS rename must fail, not overwrite */
+        } else if (rename(oldfull, newfull) != 0) {
+          *ax = (errno == ENOENT) ? 3 : ((errno == EXDEV) ? 0x11 : 5);
+        }
+      }
+    }
   } else if (query == AL_LFN_VOLINFO) { /* 0x4E - GET VOLUME INFO (fallback) */
     DBG("LFN_VOLINFO\n");
     /* byte-wise, all 11 bytes set explicitly (no stale frame data in gaps):

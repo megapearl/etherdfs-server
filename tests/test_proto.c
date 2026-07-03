@@ -240,6 +240,131 @@ int main(int argc, char **argv) {
     printf("  OK: exact + wildcard long-name matching (%d '*file*' hits)\n", hit);
   }
 
+  printf("=== increment 4: long parents + TRUENAME/MKDIR/RENAME ===\n");
+  {
+    unsigned char sub[300]; int sn, hits = 0;
+    char shortpath[280];
+    /* (a) FINDFIRST through a CASE-MISMATCHED long parent: resolve_path must
+     * now match "LONG DIR NAME" against on-disk "Long Dir Name" */
+    pl[0] = 0x37;
+    n = 1 + put_lfnstr(pl + 1, "\\LONG DIR NAME\\*");
+    memset(&ans, 0, sizeof(ans));
+    reqlen = build_req(frame, 0x41, pl, n);
+    rc = process(&ans, frame, reqlen, mymac, rootarray);
+    show_resp("FF-longparent", ans.frame, rc);
+    if ((ans.frame[58] | (ans.frame[59] << 8)) != 0) {
+      printf("  FAIL: case-mismatched long parent not resolved\n");
+      return (1);
+    }
+    /* (b) TRUENAME CL=1: long path -> full 8.3-alias path */
+    pl[0] = 1;
+    n = 1 + put_lfnstr(pl + 1, "\\Long Dir Name\\nested long file.txt");
+    memset(&ans, 0, sizeof(ans));
+    reqlen = build_req(frame, 0x4D, pl, n);
+    rc = process(&ans, frame, reqlen, mymac, rootarray);
+    if ((ans.frame[58] | (ans.frame[59] << 8)) != 0) {
+      printf("  FAIL: truename CL=1 errored\n");
+      return (1);
+    }
+    sn = ans.frame[60] | (ans.frame[61] << 8);
+    if (sn > 279) sn = 279;
+    memcpy(shortpath, ans.frame + 62, sn);
+    shortpath[sn] = 0;
+    printf("  TRUENAME CL=1: '%s'\n", shortpath);
+    if (strchr(shortpath, ' ') != NULL) {
+      printf("  FAIL: alias path still contains a space\n");
+      return (1);
+    }
+    /* (c) the alias path must round-trip: FINDFIRST on it finds the file */
+    pl[0] = 0x37;
+    n = 1 + put_lfnstr(pl + 1, shortpath);
+    memset(&ans, 0, sizeof(ans));
+    reqlen = build_req(frame, 0x41, pl, n);
+    rc = process(&ans, frame, reqlen, mymac, rootarray);
+    show_resp("FF-aliaspath", ans.frame, rc);
+    if ((ans.frame[58] | (ans.frame[59] << 8)) != 0) {
+      printf("  FAIL: alias path from CL=1 does not resolve\n");
+      return (1);
+    }
+    /* (d) TRUENAME CL=2 on the alias path -> real long names back */
+    pl[0] = 2;
+    n = 1 + put_lfnstr(pl + 1, shortpath);
+    memset(&ans, 0, sizeof(ans));
+    reqlen = build_req(frame, 0x4D, pl, n);
+    rc = process(&ans, frame, reqlen, mymac, rootarray);
+    sn = ans.frame[60] | (ans.frame[61] << 8);
+    if (sn > 279) sn = 279;
+    memcpy(shortpath, ans.frame + 62, sn);
+    shortpath[sn] = 0;
+    printf("  TRUENAME CL=2: '%s'\n", shortpath);
+    if (strcmp(shortpath, "\\Long Dir Name\\nested long file.txt") != 0) {
+      printf("  FAIL: CL=2 did not restore the long names\n");
+      return (1);
+    }
+    /* (e) MKDIR with a long name, then find it */
+    sn = put_lfnstr(sub, "\\Long Dir Name\\Nieuwe Lange Map");
+    memset(&ans, 0, sizeof(ans));
+    reqlen = build_req(frame, 0x49, sub, sn);
+    rc = process(&ans, frame, reqlen, mymac, rootarray);
+    if ((ans.frame[58] | (ans.frame[59] << 8)) != 0) {
+      printf("  FAIL: LFN_MKDIR errored\n");
+      return (1);
+    }
+    pl[0] = 0x37;
+    n = 1 + put_lfnstr(pl + 1, "\\Long Dir Name\\Nieuwe Lange*");
+    memset(&ans, 0, sizeof(ans));
+    reqlen = build_req(frame, 0x41, pl, n);
+    rc = process(&ans, frame, reqlen, mymac, rootarray);
+    show_resp("FF-newdir", ans.frame, rc);
+    if (((ans.frame[58] | (ans.frame[59] << 8)) != 0) ||
+        ((ans.frame[60] & 0x10) == 0)) {
+      printf("  FAIL: created long dir not found (or not a DIR)\n");
+      return (1);
+    }
+    /* (f) RENAME to a long target, then find it under the new name */
+    sn = put_lfnstr(sub, "\\my long file.txt");
+    sn += put_lfnstr(sub + sn, "\\Long Dir Name\\renamed even longer.txt");
+    memset(&ans, 0, sizeof(ans));
+    reqlen = build_req(frame, 0x47, sub, sn);
+    rc = process(&ans, frame, reqlen, mymac, rootarray);
+    if ((ans.frame[58] | (ans.frame[59] << 8)) != 0) {
+      printf("  FAIL: LFN_RENAME errored (AX=0x%02X)\n",
+             ans.frame[58] | (ans.frame[59] << 8));
+      return (1);
+    }
+    pl[0] = 0x37;
+    n = 1 + put_lfnstr(pl + 1, "\\Long Dir Name\\renamed even longer.txt");
+    memset(&ans, 0, sizeof(ans));
+    reqlen = build_req(frame, 0x41, pl, n);
+    rc = process(&ans, frame, reqlen, mymac, rootarray);
+    show_resp("FF-renamed", ans.frame, rc);
+    if ((ans.frame[58] | (ans.frame[59] << 8)) != 0) {
+      printf("  FAIL: renamed long target not found\n");
+      return (1);
+    }
+    /* (g) rename source must be gone; rename onto existing must fail (AX=5) */
+    pl[0] = 0x37;
+    n = 1 + put_lfnstr(pl + 1, "\\my long file.txt");
+    memset(&ans, 0, sizeof(ans));
+    reqlen = build_req(frame, 0x41, pl, n);
+    rc = process(&ans, frame, reqlen, mymac, rootarray);
+    if ((ans.frame[58] | (ans.frame[59] << 8)) == 0) {
+      printf("  FAIL: rename source still exists\n");
+      return (1);
+    }
+    sn = put_lfnstr(sub, "\\readme.txt");
+    sn += put_lfnstr(sub + sn, "\\Long Dir Name\\renamed even longer.txt");
+    memset(&ans, 0, sizeof(ans));
+    reqlen = build_req(frame, 0x47, sub, sn);
+    rc = process(&ans, frame, reqlen, mymac, rootarray);
+    if ((ans.frame[58] | (ans.frame[59] << 8)) != 5) {
+      printf("  FAIL: rename onto existing target did not return AX=5\n");
+      return (1);
+    }
+    (void)hits;
+    printf("  OK: long parents, truename round-trip, mkdir-long, rename-long\n");
+  }
+
   printf("=== AL_LFN_CREATE (0x44) a 9-char-base long file ===\n");
   pl[0] = 0x20; /* cattr archive */
   pl[1] = 0x00;

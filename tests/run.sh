@@ -34,6 +34,8 @@ rm -rf "$FIX" && mkdir -p "$FIX" && cd "$FIX"
 printf X>file_id.diz; printf XX>file_id_long.diz; printf XXX>file_id_other.diz
 printf XXXX>readme.txt; printf YY>a_long_document_name.txt; printf Z>mixedcase.txt
 printf W>"my long file.txt"
+mkdir -p "Long Dir Name"
+printf N>"Long Dir Name/nested long file.txt"
 
 echo; echo "########## WIRE / process() TEST (ethersrv.c) ##########"
 /tmp/test_proto "$FIX"
