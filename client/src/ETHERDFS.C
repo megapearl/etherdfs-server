@@ -1123,6 +1123,16 @@ void __interrupt __far inthandler(union INTPACK r) {
 #define AL_LFN_FINDNEXT  0x42
 #define AL_LFN_OPEN      0x43
 #define AL_LFN_CREATE    0x44
+#define AL_LFN_RENAME    0x47
+#define AL_LFN_MKDIR     0x49
+#define AL_LFN_TRUENAME  0x4D
+/* resident-phase op selectors that are NOT wire opcodes (values chosen far
+ * above the wire opcode range) */
+#define LFNOP_TRUENAME   0xE0  /* 7160h CL=1/2: result to caller ES:DI */
+#define LFNOP_PDPREP     0xE1  /* truename to alias path, then classic pass-down */
+#define LFNOP_RENAME     0xE2  /* 7156h via server 0x47 */
+#define LFNOP_MKDIR      0xE3  /* 7139h via server 0x49 */
+#define LFNOP_GETCWD2    0xE4  /* 7147h phase 2: alias cwd -> long, to DS:SI */
 
 /* FILETIME <-> DOS date/time conversion core for the 71A7h responder (resident;
  * no 32-bit mul/div -- see the header for the resident-safety rules) */
@@ -1291,6 +1301,25 @@ static void lfn_do_find(void) {
   }
 }
 
+/* Send AL_LFN_TRUENAME (0x4D) for the (drive-stripped) caller path. subfn:
+ * 1 = long -> full 8.3-alias path, 2 = alias/mixed -> long. Returns the
+ * sendquery result (payload length, or 0xFFFF on timeout); *ansp -> payload
+ * (u16 LE length + path bytes), *raxp -> the reply AX. Resident-stack only. */
+static unsigned short lfn_send_truename(unsigned char subfn,
+                                        unsigned char far *path,
+                                        unsigned char **ansp,
+                                        unsigned short **raxp) {
+  unsigned char *sb = glob_pktdrv_sndbuff + 60;
+  unsigned short n = 0;
+  if ((path[0] != 0) && (path[1] == ':')) path = path + 2; /* strip "X:" */
+  while ((path[n] != 0) && (n < 255)) { sb[3 + n] = path[n]; n++; }
+  sb[0] = subfn;
+  sb[1] = (unsigned char)(n & 0xff);
+  sb[2] = (unsigned char)((n >> 8) & 0xff);
+  return sendquery(AL_LFN_TRUENAME, glob_lfn_drv, (unsigned short)(3 + n),
+                   ansp, raxp, 0);
+}
+
 /* 716Ch open/create, part 1 of 2 -- the server work. Runs ON THE RESIDENT
  * STACK (uses only glob_intregs/resident globals, like lfn_do_find). Probes
  * existence via AL_LFN_OPEN (a server-side stat: no open file, no side
@@ -1311,7 +1340,7 @@ static void lfn_do_open(void) {
   unsigned char *sb = glob_pktdrv_sndbuff + 60;
   unsigned char *ans;
   unsigned short *rax;
-  unsigned short rc, n, k, ls, action, exists;
+  unsigned short rc, n, k, action, exists;
   unsigned char far *path = MK_FP(glob_intregs.w.ds, glob_intregs.w.si);
   action = glob_intregs.w.dx & 0x0013; /* bit0 open, bit1 truncate, bit4 create */
   glob_lfn_openerr = 0;
@@ -1362,38 +1391,206 @@ static void lfn_do_open(void) {
       return;
     }
   }
-  /* build the pass-down path: caller's path up to and incl. the last '\',
-   * then the alias leaf ("NAME.EXT") from the reply's FCB field [1..11].
-   * The prefix ALWAYS includes the leading "X:" so DOS resolves against OUR
-   * drive, never the process's current default drive. For a drive-relative
-   * path with no backslash (e.g. "X:FILE.TXT") ls stays past the colon so the
-   * result is "X:ALIAS.EXT" (drive-relative to X's own current dir, exactly
-   * how the redirector resolves it). */
+  /* Build the pass-down path via server TRUENAME (0x4D CL=1): the WHOLE
+   * path is translated to its 8.3-alias form component-wise, so LONG
+   * intermediate directories work (the old code spliced caller-dir + alias
+   * leaf, which required 8.3-clean parents). Prefixed with OUR drive letter
+   * so DOS resolves against our drive. The result is absolute: a
+   * drive-relative input ("X:FILE.TXT") resolves against the share root --
+   * consistent with what the probe/create above already did. */
   path = MK_FP(glob_intregs.w.ds, glob_intregs.w.si);
-  n = 0;
-  ls = ((path[0] != 0) && (path[1] == ':')) ? 2 : 0; /* keep "X:" at minimum */
-  while ((path[n] != 0) && (n < 255)) {
-    if (path[n] == '\\') ls = (unsigned short)(n + 1);
-    n++;
-  }
-  if (ls + 13 >= sizeof(glob_lfn_openpath)) { /* dir part too long */
-    glob_lfn_openerr = 0x03; /* path not found */
-    return;
-  }
-  for (k = 0; k < ls; k++) glob_lfn_openpath[k] = path[k];
-  /* alias FCB -> "NAME.EXT" */
-  for (n = 0; n < 8; n++) {
-    if (ans[1 + n] == ' ') break;
-    glob_lfn_openpath[k++] = ans[1 + n];
-  }
-  if (ans[9] != ' ') {
-    glob_lfn_openpath[k++] = '.';
-    for (n = 8; n < 11; n++) {
-      if (ans[1 + n] == ' ') break;
-      glob_lfn_openpath[k++] = ans[1 + n];
+  {
+    unsigned short *trax;
+    rc = lfn_send_truename(1, path, &ans, &trax);
+    if (rc == 0xffffu) { glob_lfn_openerr = 0x02; return; }
+    if (rc < 3) {
+      glob_lfn_openerr = (*trax != 0) ? *trax : 0x03;
+      return;
     }
   }
-  glob_lfn_openpath[k] = 0;
+  n = (unsigned short)ans[0] | ((unsigned short)ans[1] << 8);
+  if (n + 3 >= sizeof(glob_lfn_openpath)) { /* alias path too long */
+    glob_lfn_openerr = 0x03;
+    return;
+  }
+  glob_lfn_openpath[0] = (unsigned char)('A' + glob_lfn_drv);
+  glob_lfn_openpath[1] = ':';
+  for (k = 0; k < n; k++) glob_lfn_openpath[2 + k] = ans[2 + k];
+  glob_lfn_openpath[2 + n] = 0;
+}
+/* Remaining LFN ops, resident-stack phase (uses only glob_intregs + resident
+ * globals + far pointers, like lfn_do_find/lfn_do_open). Selected via
+ * glob_lfn_op -- see the LFNOP_* constants. */
+static void lfn_do_misc(void) {
+  unsigned char *sb = glob_pktdrv_sndbuff + 60;
+  unsigned char *ans;
+  unsigned short *rax;
+  unsigned short rc, n, k;
+  if (glob_lfn_op == LFNOP_TRUENAME) {
+    /* 7160h CL=1/2: path from caller DS:SI, result "X:\..." to caller ES:DI */
+    unsigned char far *src = MK_FP(glob_intregs.w.ds, glob_intregs.w.si);
+    unsigned char far *dst = MK_FP(glob_intregs.w.es, glob_intregs.w.di);
+    rc = lfn_send_truename(glob_lfn_sub, src, &ans, &rax);
+    if (rc == 0xffffu) {
+      glob_intregs.w.ax = 0x02;
+      glob_intregs.w.flags |= INTR_CF;
+      return;
+    }
+    if (rc < 3) {
+      glob_intregs.w.ax = (*rax != 0) ? *rax : 0x03;
+      glob_intregs.w.flags |= INTR_CF;
+      return;
+    }
+    n = (unsigned short)ans[0] | ((unsigned short)ans[1] << 8);
+    if ((glob_lfn_sub == 1) && (n > 64)) {
+      /* RBIL rb-3207: the CL=1 result buffer is only 67 bytes (classic SFN
+       * path limit). "X:" + n + NUL must fit -> fail rather than overrun. */
+      glob_intregs.w.ax = 0x03;
+      glob_intregs.w.flags |= INTR_CF;
+      return;
+    }
+    if (n > 257) n = 257; /* CL=2 caller buffer is 261 bytes incl. "X:" + NUL */
+    dst[0] = (unsigned char)('A' + glob_lfn_drv);
+    dst[1] = ':';
+    for (k = 0; k < n; k++) dst[2 + k] = ans[2 + k];
+    dst[2 + n] = 0;
+    glob_intregs.w.ax = 0; /* RBIL: AX destroyed on success */
+    glob_intregs.w.flags &= ~INTR_CF;
+  } else if (glob_lfn_op == LFNOP_PDPREP) {
+    /* del/rd/cd/attr: translate caller DS:DX path to "X:\ALIAS\..." into
+     * glob_lfn_openpath; the dispatcher then passes the classic call down */
+    unsigned char far *src = MK_FP(glob_intregs.w.ds, glob_intregs.w.dx);
+    glob_lfn_openerr = 0;
+    rc = lfn_send_truename(1, src, &ans, &rax);
+    if (rc == 0xffffu) { glob_lfn_openerr = 0x02; return; }
+    if (rc < 3) {
+      glob_lfn_openerr = (*rax != 0) ? *rax : 0x03;
+      return;
+    }
+    n = (unsigned short)ans[0] | ((unsigned short)ans[1] << 8);
+    if (n + 3 >= sizeof(glob_lfn_openpath)) { glob_lfn_openerr = 0x03; return; }
+    glob_lfn_openpath[0] = (unsigned char)('A' + glob_lfn_drv);
+    glob_lfn_openpath[1] = ':';
+    for (k = 0; k < n; k++) glob_lfn_openpath[2 + k] = ans[2 + k];
+    glob_lfn_openpath[2 + n] = 0;
+  } else if (glob_lfn_op == LFNOP_RENAME) {
+    /* 7156h: old DS:DX + new ES:DI -> server 0x47 (LFNSTR + LFNSTR); the
+     * target leaf keeps its REAL long name server-side */
+    unsigned char far *po = MK_FP(glob_intregs.w.ds, glob_intregs.w.dx);
+    unsigned char far *pn = MK_FP(glob_intregs.w.es, glob_intregs.w.di);
+    unsigned short l1 = 0, l2 = 0;
+    if ((po[0] != 0) && (po[1] == ':')) po = po + 2;
+    if ((pn[0] != 0) && (pn[1] == ':')) pn = pn + 2;
+    while ((po[l1] != 0) && (l1 < 255)) { sb[2 + l1] = po[l1]; l1++; }
+    sb[0] = (unsigned char)(l1 & 0xff);
+    sb[1] = (unsigned char)((l1 >> 8) & 0xff);
+    while ((pn[l2] != 0) && (l2 < 255)) { sb[4 + l1 + l2] = pn[l2]; l2++; }
+    sb[2 + l1] = (unsigned char)(l2 & 0xff);
+    sb[3 + l1] = (unsigned char)((l2 >> 8) & 0xff);
+    rc = sendquery(AL_LFN_RENAME, glob_lfn_drv,
+                   (unsigned short)(4 + l1 + l2), &ans, &rax, 0);
+    if (rc == 0xffffu) {
+      glob_intregs.w.ax = 0x05;
+      glob_intregs.w.flags |= INTR_CF;
+    } else if (*rax != 0) {
+      glob_intregs.w.ax = *rax;
+      glob_intregs.w.flags |= INTR_CF;
+    } else {
+      glob_intregs.w.ax = 0;
+      glob_intregs.w.flags &= ~INTR_CF;
+    }
+  } else if (glob_lfn_op == LFNOP_MKDIR) {
+    /* 7139h: path DS:DX -> server 0x49 (created under the real long name) */
+    unsigned char far *src = MK_FP(glob_intregs.w.ds, glob_intregs.w.dx);
+    unsigned short l1 = 0;
+    if ((src[0] != 0) && (src[1] == ':')) src = src + 2;
+    while ((src[l1] != 0) && (l1 < 255)) { sb[2 + l1] = src[l1]; l1++; }
+    sb[0] = (unsigned char)(l1 & 0xff);
+    sb[1] = (unsigned char)((l1 >> 8) & 0xff);
+    rc = sendquery(AL_LFN_MKDIR, glob_lfn_drv, (unsigned short)(2 + l1),
+                   &ans, &rax, 0);
+    if (rc == 0xffffu) {
+      glob_intregs.w.ax = 0x05;
+      glob_intregs.w.flags |= INTR_CF;
+    } else if (*rax != 0) {
+      glob_intregs.w.ax = *rax;
+      glob_intregs.w.flags |= INTR_CF;
+    } else {
+      glob_intregs.w.ax = 0;
+      glob_intregs.w.flags &= ~INTR_CF;
+    }
+  } else if (glob_lfn_op == LFNOP_GETCWD2) {
+    /* 7147h phase 2: glob_lfn_openpath = alias cwd from the classic 47h
+     * pass-down (no drive, no leading backslash, RBIL form). Translate to
+     * long via 0x4D CL=2 and write to caller DS:SI in the same form. */
+    unsigned char far *dst = MK_FP(glob_intregs.w.ds, glob_intregs.w.si);
+    unsigned short l1 = 0, skip;
+    while ((glob_lfn_openpath[l1] != 0) && (l1 < 254)) l1++;
+    sb[0] = 2;
+    sb[1] = (unsigned char)((l1 + 1) & 0xff);
+    sb[2] = (unsigned char)(((l1 + 1) >> 8) & 0xff);
+    sb[3] = 0x5C; /* re-add the leading backslash for the server walk */
+    for (k = 0; k < l1; k++) sb[4 + k] = glob_lfn_openpath[k];
+    rc = sendquery(AL_LFN_TRUENAME, glob_lfn_drv, (unsigned short)(4 + l1),
+                   &ans, &rax, 0);
+    if ((rc == 0xffffu) || (rc < 3)) {
+      /* fall back to the alias cwd the classic call already returned */
+      for (k = 0; k <= l1; k++) dst[k] = glob_lfn_openpath[k];
+      glob_intregs.w.ax = 0;
+      glob_intregs.w.flags &= ~INTR_CF;
+      return;
+    }
+    n = (unsigned short)ans[0] | ((unsigned short)ans[1] << 8);
+    skip = ((n > 0) && (ans[2] == 0x5C)) ? 1 : 0;
+    if ((unsigned short)(n - skip) > 259) n = (unsigned short)(259 + skip);
+    for (k = 0; k < (unsigned short)(n - skip); k++) dst[k] = ans[2 + skip + k];
+    dst[n - skip] = 0;
+    glob_intregs.w.ax = 0;
+    glob_intregs.w.flags &= ~INTR_CF;
+  }
+}
+
+/* Generic classic-call pass-down on the CALLER's stack (same proven pattern
+ * as the 716Ch 6C00h block): load the register image while BP is still valid,
+ * simulate INT 21h to the previous handler, restore all registers, and only
+ * THEN store the results into DS-relative globals (DOS may clobber BP during
+ * the call, so BP-relative locals are unsafe until after the restore).
+ * pdx/psi are raw register values; for pointer-taking calls pass the OFFSET
+ * of a RESIDENT buffer (DS = our resident segment during the call; ES is set
+ * = DS as well). Results: glob_lfn_pdax / glob_lfn_pdcx / glob_lfn_pdfl. */
+static void lfn_passdown(unsigned short pax, unsigned short pbx,
+                         unsigned short pcx, unsigned short pdx,
+                         unsigned short psi) {
+  _asm {
+    push bp
+    push ds
+    push es
+    push si
+    push di
+    push bx
+    mov ax, pax
+    mov bx, pbx
+    mov cx, pcx
+    mov dx, pdx
+    mov si, psi
+    push ds
+    pop es
+    sti
+    pushf
+    cli
+    call dword ptr glob_prev21call
+    pop bx
+    pop di
+    pop si
+    pop es
+    pop ds
+    pop bp
+    mov glob_lfn_pdax, ax
+    mov glob_lfn_pdcx, cx
+    pushf
+    pop ax
+    mov glob_lfn_pdfl, ax
+  }
 }
 /* ========================================================================== */
 
@@ -1534,6 +1731,26 @@ void __interrupt __far inthandler21(union INTPACK r) {
   }
   if (r.h.ah == 0x71) {
     unsigned char do_lfn = 0; /* set to 1 to run the guarded server round-trip */
+    /* Nested-context flag, computed BEFORE any branch may write the shared
+     * glob_lfn_* dispatch globals: while an outer invocation is blocked in
+     * sendquery (interrupts on, SS==DS), an ISR-issued LFN call must NOT
+     * overwrite glob_lfn_op/pdop/drv/... -- the outer would resume and
+     * execute the WRONG operation (e.g. a set-attr pass-down flipped into a
+     * delete). Every our-drive branch bails on this flag before its first
+     * global write; the guard inside the do_lfn block stays as backstop. */
+    volatile unsigned char lfn_nested = 0;
+    _asm {
+      push ax
+      push bx
+      mov ax, ss
+      mov bx, ds
+      cmp ax, bx
+      jne n71top
+      mov byte ptr lfn_nested, 1
+    n71top:
+      pop bx
+      pop ax
+    }
     if (r.h.al == 0xA0) { /* 71A0h GET VOLUME INFO -- advertise LFN locally */
       unsigned char far *rp = MK_FP(r.w.ds, r.w.dx); /* ASCIZ "X:\" */
       unsigned char idx = 0xff;
@@ -1555,6 +1772,7 @@ void __interrupt __far inthandler21(union INTPACK r) {
       unsigned char idx = 0xff, s;
       if ((pp[0] != 0) && (pp[1] == ':')) idx = DRIVETONUM(pp[0]);
       if ((idx <= 25) && (glob_data.ldrv[idx] != 0xff)) { /* our drive */
+        if (lfn_nested) { r.w.ax = 0x0005; r.w.flags |= INTR_CF; return; }
         for (s = 0; s < LFN_FINDMAX; s++) if (glob_lfn_find[s].inuse == 0) break;
         if (s >= LFN_FINDMAX) { /* find table full */
           r.w.ax = 0x12; r.w.flags |= INTR_CF; return;
@@ -1569,6 +1787,7 @@ void __interrupt __far inthandler21(union INTPACK r) {
       if ((r.w.bx & 0xff00u) == LFN_HANDLE_MAGIC) {
         unsigned char s = (unsigned char)(r.w.bx & 0xff);
         if ((s < LFN_FINDMAX) && (glob_lfn_find[s].inuse != 0)) { /* our handle */
+          if (lfn_nested) { r.w.ax = 0x0005; r.w.flags |= INTR_CF; return; }
           glob_lfn_slot = s;
           glob_lfn_drv = glob_lfn_find[s].drv;
           glob_lfn_op = AL_LFN_FINDNEXT;
@@ -1579,6 +1798,7 @@ void __interrupt __far inthandler21(union INTPACK r) {
       if ((r.w.bx & 0xff00u) == LFN_HANDLE_MAGIC) {
         unsigned char s = (unsigned char)(r.w.bx & 0xff);
         if ((s < LFN_FINDMAX) && (glob_lfn_find[s].inuse != 0)) {
+          if (lfn_nested) { r.w.ax = 0x0005; r.w.flags |= INTR_CF; return; }
           glob_lfn_find[s].inuse = 0;
           r.w.flags &= ~INTR_CF; /* success */
           return;
@@ -1595,8 +1815,155 @@ void __interrupt __far inthandler21(union INTPACK r) {
       unsigned char idx = 0xff;
       if ((pp[0] != 0) && (pp[1] == ':')) idx = DRIVETONUM(pp[0]);
       if ((idx <= 25) && (glob_data.ldrv[idx] != 0xff)) { /* our drive */
+        if (lfn_nested) { r.w.ax = 0x0005; r.w.flags |= INTR_CF; return; }
         glob_lfn_drv = idx;
         glob_lfn_op = AL_LFN_OPEN;
+        do_lfn = 1;
+      }
+    } else if (r.h.al == 0x60) { /* 7160h TRUENAME (CL=0/1/2) */
+      unsigned char far *pp = MK_FP(r.w.ds, r.w.si);
+      unsigned char idx = 0xff;
+      if ((pp[0] != 0) && (pp[1] == ':')) idx = DRIVETONUM(pp[0]);
+      if ((idx <= 25) && (glob_data.ldrv[idx] != 0xff)) {
+        if (r.h.cl == 0) {
+          /* canonicalize WITHOUT shortening (RBIL rb-3206): callers (4DOS
+           * mkfname) pass already-qualified paths; return it uppercased */
+          unsigned char far *dst = MK_FP(r.w.es, r.w.di);
+          unsigned short k2;
+          unsigned char c;
+          for (k2 = 0; (pp[k2] != 0) && (k2 < 260); k2++) {
+            c = pp[k2];
+            dst[k2] = ((c >= 'a') && (c <= 'z')) ? (unsigned char)(c - 32) : c;
+          }
+          dst[k2] = 0;
+          r.w.ax = 0;
+          r.w.flags &= ~INTR_CF;
+          return;
+        }
+        if ((r.h.cl == 1) || (r.h.cl == 2)) {
+          if (lfn_nested) { r.w.ax = 0x0005; r.w.flags |= INTR_CF; return; }
+          glob_lfn_drv = idx;
+          glob_lfn_sub = r.h.cl;
+          glob_lfn_op = LFNOP_TRUENAME;
+          do_lfn = 1;
+        }
+        /* other CL -> chain */
+      }
+    } else if (r.h.al == 0x41) { /* 7141h delete (exact long names) */
+      unsigned char far *pp = MK_FP(r.w.ds, r.w.dx);
+      unsigned char idx = 0xff, wild = 0;
+      unsigned short k2;
+      if ((pp[0] != 0) && (pp[1] == ':')) idx = DRIVETONUM(pp[0]);
+      if ((idx <= 25) && (glob_data.ldrv[idx] != 0xff)) {
+        for (k2 = 0; (pp[k2] != 0) && (k2 < 260); k2++)
+          if ((pp[k2] == '*') || (pp[k2] == '?')) wild = 1;
+        if (wild) {
+          /* RBIL: SI=0 forbids wildcards (error 3); SI=1 wildcard delete is
+           * not implemented (4DOS never sends it) -> access denied */
+          r.w.ax = ((r.w.si & 1) == 0) ? 0x03 : 0x05;
+          r.w.flags |= INTR_CF;
+          return;
+        }
+        if (lfn_nested) { r.w.ax = 0x0005; r.w.flags |= INTR_CF; return; }
+        glob_lfn_drv = idx;
+        glob_lfn_pdop = 0x4100u;
+        glob_lfn_op = LFNOP_PDPREP;
+        do_lfn = 1;
+      }
+    } else if ((r.h.al == 0x3A) || (r.h.al == 0x3B)) { /* 713Ah rd / 713Bh cd */
+      unsigned char far *pp = MK_FP(r.w.ds, r.w.dx);
+      unsigned char idx = 0xff;
+      if ((pp[0] != 0) && (pp[1] == ':')) idx = DRIVETONUM(pp[0]);
+      if ((idx <= 25) && (glob_data.ldrv[idx] != 0xff)) {
+        if (lfn_nested) { r.w.ax = 0x0005; r.w.flags |= INTR_CF; return; }
+        glob_lfn_drv = idx;
+        glob_lfn_pdop = (r.h.al == 0x3A) ? 0x3A00u : 0x3B00u;
+        glob_lfn_op = LFNOP_PDPREP;
+        do_lfn = 1;
+        /* on success DOS itself updates the CDS with the (alias) path we
+         * passed down -- FreeDOS dosfns.c DosChangeDir does the copy-back */
+      }
+    } else if (r.h.al == 0x39) { /* 7139h mkdir: MUST keep the long name */
+      unsigned char far *pp = MK_FP(r.w.ds, r.w.dx);
+      unsigned char idx = 0xff;
+      if ((pp[0] != 0) && (pp[1] == ':')) idx = DRIVETONUM(pp[0]);
+      if ((idx <= 25) && (glob_data.ldrv[idx] != 0xff)) {
+        unsigned short k2;
+        if (lfn_nested) { r.w.ax = 0x0005; r.w.flags |= INTR_CF; return; }
+        for (k2 = 0; (pp[k2] != 0) && (k2 < 260); k2++) {
+          if ((pp[k2] == '*') || (pp[k2] == '?')) { /* wildcards: a literal
+              '*'/'?' name would be creatable server-side yet unreachable from
+              DOS afterwards */
+            r.w.ax = 0x0003; r.w.flags |= INTR_CF; return;
+          }
+        }
+        glob_lfn_drv = idx;
+        glob_lfn_op = LFNOP_MKDIR;
+        do_lfn = 1;
+      }
+    } else if (r.h.al == 0x43) { /* 7143h get/set attributes by path */
+      if (r.h.bl <= 1) { /* BL=0 get (out CX) / BL=1 set (in CX) */
+        unsigned char far *pp = MK_FP(r.w.ds, r.w.dx);
+        unsigned char idx = 0xff;
+        if ((pp[0] != 0) && (pp[1] == ':')) idx = DRIVETONUM(pp[0]);
+        if ((idx <= 25) && (glob_data.ldrv[idx] != 0xff)) {
+          if (lfn_nested) { r.w.ax = 0x0005; r.w.flags |= INTR_CF; return; }
+          glob_lfn_drv = idx;
+          glob_lfn_pdop = (unsigned short)(0x4300u | r.h.bl);
+          glob_lfn_op = LFNOP_PDPREP;
+          do_lfn = 1;
+        }
+      }
+      /* BL>=2 (file times by path) -> chain; 4DOS TOUCH uses handle-based
+       * 5705h/5707h instead, which ride the open-handle path */
+    } else if (r.h.al == 0x56) { /* 7156h rename (long target preserved) */
+      unsigned char far *po = MK_FP(r.w.ds, r.w.dx);
+      unsigned char far *pn = MK_FP(r.w.es, r.w.di);
+      unsigned char idx = 0xff, idx2 = 0xff;
+      if ((po[0] != 0) && (po[1] == ':')) idx = DRIVETONUM(po[0]);
+      if ((idx <= 25) && (glob_data.ldrv[idx] != 0xff)) {
+        if ((pn[0] != 0) && (pn[1] == ':')) idx2 = DRIVETONUM(pn[0]);
+        if (idx2 != idx) { /* RBIL: not across disks */
+          r.w.ax = 0x11;
+          r.w.flags |= INTR_CF;
+          return;
+        }
+        if (lfn_nested) { r.w.ax = 0x0005; r.w.flags |= INTR_CF; return; }
+        {
+          unsigned short k2;
+          for (k2 = 0; (po[k2] != 0) && (k2 < 260); k2++)
+            if ((po[k2] == '*') || (po[k2] == '?')) {
+              r.w.ax = 0x0003; r.w.flags |= INTR_CF; return;
+            }
+          for (k2 = 0; (pn[k2] != 0) && (k2 < 260); k2++)
+            if ((pn[k2] == '*') || (pn[k2] == '?')) {
+              r.w.ax = 0x0003; r.w.flags |= INTR_CF; return;
+            }
+        }
+        glob_lfn_drv = idx;
+        glob_lfn_op = LFNOP_RENAME;
+        do_lfn = 1;
+      }
+    } else if (r.h.al == 0x47) { /* 7147h get current directory (long) */
+      unsigned char idx = (r.h.dl == 0)
+                            ? ((unsigned char far *)glob_sdaptr)[0x16]
+                            : (unsigned char)(r.h.dl - 1);
+      if ((idx <= 25) && (glob_data.ldrv[idx] != 0xff)) {
+        /* nested guard BEFORE the phase-1 pass-down AND the buffer write:
+         * if we are nested inside a blocked send, DOS is mid-operation and
+         * must not be re-entered (and glob_lfn_openpath belongs to the outer) */
+        if (lfn_nested) { r.w.ax = 0x0005; r.w.flags |= INTR_CF; return; }
+        /* phase 1 NOW, on the caller stack: classic 47h pass-down reads the
+         * (alias) cwd text DOS keeps in the CDS into our resident buffer */
+        lfn_passdown(0x4700u, 0, 0, (unsigned short)r.h.dl,
+                     (unsigned short)(unsigned char near *)glob_lfn_openpath);
+        if (glob_lfn_pdfl & 0x0001) {
+          r.w.ax = glob_lfn_pdax;
+          r.w.flags |= INTR_CF;
+          return;
+        }
+        glob_lfn_drv = idx;
+        glob_lfn_op = LFNOP_GETCWD2; /* phase 2: alias -> long, to DS:SI */
         do_lfn = 1;
       }
     } else if (r.h.al == 0xA7) { /* 71A7h FILETIME <-> DOS date/time */
@@ -1688,13 +2055,39 @@ void __interrupt __far inthandler21(union INTPACK r) {
       }
       if (glob_lfn_op == AL_LFN_OPEN)
         lfn_do_open();
-      else
+      else if ((glob_lfn_op == AL_LFN_FINDFIRST) ||
+               (glob_lfn_op == AL_LFN_FINDNEXT))
         lfn_do_find();
+      else
+        lfn_do_misc();
       _asm {
         cli
         mov SS, glob_o21ss
         mov SP, glob_o21sp
         sti
+      }
+      if (glob_lfn_op == LFNOP_PDPREP) {
+        /* phase 2 of del/rd/cd/attr: classic pass-down of the alias path, on
+         * the CALLER's stack (the nested 2Fh op must not see SS==DS) */
+        unsigned short pcxin;
+        if (glob_lfn_openerr != 0) {
+          r.w.ax = glob_lfn_openerr;
+          r.w.flags |= INTR_CF;
+          return;
+        }
+        pcxin = (glob_lfn_pdop == 0x4301u) ? r.w.cx : 0;
+        lfn_passdown(glob_lfn_pdop, 0, pcxin,
+                     (unsigned short)(unsigned char near *)glob_lfn_openpath,
+                     0);
+        r.w.ax = glob_lfn_pdax;
+        if (glob_lfn_pdfl & 0x0001) {
+          r.w.flags |= INTR_CF;
+        } else {
+          if (glob_lfn_pdop == 0x4300u)
+            r.w.cx = glob_lfn_pdcx; /* attributes from the classic get */
+          r.w.flags &= ~INTR_CF;
+        }
+        return;
       }
       if (glob_lfn_op != AL_LFN_OPEN) {
         copybytes(&r, &glob_intregs, sizeof(union INTPACK));
