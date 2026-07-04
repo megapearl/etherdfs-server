@@ -2802,23 +2802,33 @@ int main(int argc, char **argv) {
       pop bx
       pop ax
     }
-    int2fptr = (unsigned char far *)MK_FP(myseg, myoff) + 24; /* the interrupt handler's signature appears at offset 24 (this might change at each source code modification) */
-    /* look for the "MVet" signature */
-    if ((int2fptr[0] != 'M') || (int2fptr[1] != 'V') || (int2fptr[2] != 'e') || (int2fptr[3] != 't')) {
-      /* report WHICH handler now owns INT 2Fh (myseg:myoff) so it can be
-       * matched against MEM /D -- a TSR loaded/hooked after us (a network
-       * redirector, a telnet server, a resident file manager, ...). */
-      char hx[12];
-      outmsg("EtherDFS cannot be unloaded: INT 2Fh now owned by $");
-      byte2hex(hx + 0, (unsigned char)(myseg >> 8));
-      byte2hex(hx + 2, (unsigned char)(myseg & 0xff));
-      hx[4] = ':';
-      byte2hex(hx + 5, (unsigned char)(myoff >> 8));
-      byte2hex(hx + 7, (unsigned char)(myoff & 0xff));
-      hx[9] = '$';
-      outmsg(hx);
-      outmsg(" (a later TSR). Unload it first, or reboot.\r\n$");
-      return(1);
+    /* SCAN the first 96 bytes for the "MVet" signature instead of trusting a
+     * hardcoded offset. The signature's distance from the handler entry shifts
+     * as the prologue changes across builds (it moved from +24 to +25 when the
+     * INT 21h/LFN code was added), and a fixed offset then silently mis-fires
+     * and refuses a LEGITIMATE unload even though EtherDFS is still on top of
+     * INT 2Fh. This mirrors the INT 21h "MV21" scan below. */
+    int2fptr = (unsigned char far *)MK_FP(myseg, myoff);
+    {
+      unsigned short k2f;
+      for (k2f = 0; k2f < 96; k2f++) {
+        if ((int2fptr[k2f] == 'M') && (int2fptr[k2f + 1] == 'V') &&
+            (int2fptr[k2f + 2] == 'e') && (int2fptr[k2f + 3] == 't')) break;
+      }
+      if (k2f >= 96) {
+        /* genuinely not on top -- report WHO owns INT 2Fh (match with MEM /D) */
+        char hx[12];
+        outmsg("EtherDFS cannot be unloaded: INT 2Fh now owned by $");
+        byte2hex(hx + 0, (unsigned char)(myseg >> 8));
+        byte2hex(hx + 2, (unsigned char)(myseg & 0xff));
+        hx[4] = ':';
+        byte2hex(hx + 5, (unsigned char)(myoff >> 8));
+        byte2hex(hx + 7, (unsigned char)(myoff & 0xff));
+        hx[9] = '$';
+        outmsg(hx);
+        outmsg(" (a later TSR). Unload it first, or reboot.\r\n$");
+        return(1);
+      }
     }
     /* also confirm we are still the top of the INT 21h chain (signature
      * "MV21"). If another TSR hooked INT 21h after us, unloading would leave a
