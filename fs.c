@@ -108,6 +108,15 @@ void cp_disk2wire(const char *utf8, char *out, int outsz) {
     }
     if (!ok) { out[o++] = '_'; s++; continue; } /* truncated sequence */
     s += n + 1;
+    /* reject non-shortest (overlong) forms, UTF-16 surrogates and beyond-
+     * Unicode values: never let "different bytes, same code point" alias a
+     * name (RFC 3629). readdir() should not produce these, but be strict. */
+    if (((n == 1) && (cp < 0x80)) || ((n == 2) && (cp < 0x800)) ||
+        ((n == 3) && (cp < 0x10000)) ||
+        ((cp >= 0xD800) && (cp <= 0xDFFF)) || (cp > 0x10FFFFul)) {
+      out[o++] = '_';
+      continue;
+    }
     if (cp < 0x80) { out[o++] = (char)cp; continue; }
     { int i, hit = -1;
       for (i = 0; i < 128; i++) if (g_cp_hi[i] == cp) { hit = i; break; }

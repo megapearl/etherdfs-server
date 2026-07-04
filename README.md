@@ -6,6 +6,8 @@ This repository hosts a fork based on [oerg866/ethersrv-866](https://github.com/
 
 ## 🌟 Key Improvements in this Version
 * **TrueNAS/ZFS 8.3 SFN Compatibility:** Added a custom algorithm to generate DOS-compatible 8.3 Short File Names (`~1`) on the fly. This prevents DOS clients from crashing or failing to access files with long names, spaces, or lowercase letters on case-sensitive filesystems like ZFS. 
+* **Native Long File Name (LFN) support:** With the bundled client (`client/`), DOS gets the full Win95-style LFN API on the mapped drive: `DIR` shows real long names, and open/copy/`ren`/`del`/`md`/`rd`/`cd`/`attrib`/truename all accept long names and long directory components (INT 21h `71xx` served by the client TSR; additive wire opcodes `0x40-0x4E`). Works alongside DOSLFN (load DOSLFN first, EtherDFS last): DOSLFN keeps serving local FAT drives, EtherDFS serves its own network drives. Tested with 4DOS 8.00 + PC DOS 7.10 + Norton Commander.
+* **OEM codepage conversion:** Filenames are stored as UTF-8 on the NAS but travel the wire in the DOS OEM codepage (CP437 by default, CP850 via `ETHERDFS_CODEPAGE`), so accented names (`Café Menü.txt`) display and round-trip correctly on both sides. Unmappable characters degrade to `_`.
 * **Huge Directory Support:** Removed the rigid 1024-file limit for Short File Name caching. The server now dynamically allocates memory to reliably support gigantic DOS collections (like eXoDOS with 3500+ items per directory) without returning "Invalid directory" errors.
 * **Adjustable Output Delay:** Added an optional delay parameter (`ETHERDFS_DELAY`) to slow down server packet transmission, preventing buffer overruns on vintage 8086/XT network cards (like the NE2000).
 * **Dynamic Volume Labels:** Serve custom volume labels to your DOS machine (e.g. `RETRO`) via the `VOLUME_LABEL` environment variable.
@@ -69,7 +71,8 @@ services:
 | :--- | :--- | :--- |
 | `INTERFACE` | `vlan2` | The physical network interface name on the docker host (e.g., `eth0`, `vlan2`). The container will wait gracefully if the interface doesn't exist yet. |
 | `VOLUME_LABEL` | `(directory name)`| An optional custom DOS Volume Label (max 11 chars). If omitted, the root directory name is capitalized and used. |
-| `ETHERDFS_DEBUG`| `0` | Set to `1` to enable verbose logging of DOS operations (`AL_OPEN`, `AL_READ`, `AL_FINDNEXT`) to stdout. Excellent for troubleshooting. |
+| `ETHERDFS_DEBUG`| `0` | Set to `1` to enable verbose logging of DOS operations (`AL_OPEN`, `AL_READ`, `AL_FINDNEXT`) to stdout. Excellent for troubleshooting. **Do not leave enabled in production**: the per-query output is large, and if the Docker log driver applies backpressure the (single-threaded) server blocks on `write()` for seconds, which DOS clients experience as timeouts ("File not found", drive errors). |
+| `ETHERDFS_CODEPAGE`| `437` | OEM codepage used to convert filenames between the UTF-8 filesystem and the DOS wire. Supported: `437` (US/Western, default) and `850` (Latin-1). |
 | `ETHERDFS_DELAY`| `0` | Artificial network transmission delay in milliseconds (e.g. `5` or `10`). Increase this if your DOS PC crashes or halts during large file transfers due to full NIC buffers. |
 
 *(Note: The container expects the shared directory to be mounted exactly at `/data`).*

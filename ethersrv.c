@@ -126,6 +126,13 @@ enum AL_SUBFUNCTIONS {
   AL_UNKNOWN = 0xFF
 };
 
+/* Bound a wire-supplied copy length to a destination buffer: the legacy
+ * handlers memcpy'd reqbufflen-derived lengths into fixed 256-byte path
+ * buffers unchecked, so a crafted oversized frame could smash the stack (the
+ * LFN handlers use the bounded lfnstr_get instead). A truncated path simply
+ * fails to resolve later (DOS error 2/3). */
+#define CLAMPLEN(len, buf) (((int)(len) > (int)sizeof(buf) - 1) ? (int)sizeof(buf) - 1 : (int)(len))
+
 /* an array with flags indicating whether given drive is FAT-based or not */
 static unsigned char drivesfat[26]; /* 0 if not, non-zero otherwise */
 
@@ -508,8 +515,9 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
     {
       char dos_search_path[256];
       char resolved_dir[512];
-      memcpy(dos_search_path, (char *)reqbuff + 1, reqbufflen - 1);
-      dos_search_path[reqbufflen - 1] = 0;
+      { int cplen = CLAMPLEN(reqbufflen - 1, dos_search_path);
+        memcpy(dos_search_path, (char *)reqbuff + 1, cplen);
+        dos_search_path[cplen] = 0; }
       lostring(dos_search_path, -1);
       charreplace(dos_search_path, '\\', '/');
 
@@ -609,8 +617,9 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
       char directory[512];
       char dos_dir[256];
 
-      memcpy(dos_dir, (char *)reqbuff, reqbufflen);
-      dos_dir[reqbufflen] = 0;
+      { int cplen = CLAMPLEN(reqbufflen, dos_dir);
+        memcpy(dos_dir, (char *)reqbuff, cplen);
+        dos_dir[cplen] = 0; }
       lostring(dos_dir, -1);
       charreplace(dos_dir, '\\', '/');
 
@@ -642,8 +651,9 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
     char directory[512];
     char dos_dir[256];
 
-    memcpy(dos_dir, (char *)reqbuff, reqbufflen);
-    dos_dir[reqbufflen] = 0;
+    { int cplen = CLAMPLEN(reqbufflen, dos_dir);
+      memcpy(dos_dir, (char *)reqbuff, cplen);
+      dos_dir[cplen] = 0; }
     lostring(dos_dir, -1);
     charreplace(dos_dir, '\\', '/');
 
@@ -670,8 +680,9 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
       fattr = reqbuff[0];
 
       /* get full file path */
-      memcpy(dos_fname, (char *)reqbuff + 1, reqbufflen - 1);
-      dos_fname[reqbufflen - 1] = 0;
+      { int cplen = CLAMPLEN(reqbufflen - 1, dos_fname);
+        memcpy(dos_fname, (char *)reqbuff + 1, cplen);
+        dos_fname[cplen] = 0; }
       lostring(dos_fname, -1);
       charreplace(dos_fname, '\\', '/');
 
@@ -690,8 +701,9 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
     struct fileprops fprops;
 
     /* get full file path */
-    memcpy(dos_fname, (char *)reqbuff, reqbufflen);
-    dos_fname[reqbufflen] = 0;
+    { int cplen = CLAMPLEN(reqbufflen, dos_fname);
+      memcpy(dos_fname, (char *)reqbuff, cplen);
+      dos_fname[cplen] = 0; }
     lostring(dos_fname, -1);
     charreplace(dos_fname, '\\', '/');
 
@@ -729,8 +741,9 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
         lostring(dos_fn1, -1);
         charreplace(dos_fn1, '\\', '/');
 
-        memcpy(dos_fn2, reqbuff + 1 + fn1len, fn2len);
-        dos_fn2[fn2len] = 0;
+        { int cplen = CLAMPLEN(fn2len, dos_fn2);
+          memcpy(dos_fn2, reqbuff + 1 + fn1len, cplen);
+          dos_fn2[cplen] = 0; }
         lostring(dos_fn2, -1);
         charreplace(dos_fn2, '\\', '/');
 
@@ -790,8 +803,9 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
       char dos_fname[256];
 
       /* compute full path/file first */
-      memcpy(dos_fname, reqbuff, reqbufflen);
-      dos_fname[reqbufflen] = 0;
+      { int cplen = CLAMPLEN(reqbufflen, dos_fname);
+        memcpy(dos_fname, reqbuff, cplen);
+        dos_fname[cplen] = 0; }
       lostring(dos_fname, -1);
       charreplace(dos_fname, '\\', '/');
 
@@ -826,8 +840,9 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
     spopen_openmode = le16toh(wreqbuff[2]);
 
     /* decode DOS path */
-    memcpy(dos_full, reqbuff + 6, reqbufflen - 6);
-    dos_full[reqbufflen - 6] = 0;
+    { int cplen = CLAMPLEN(reqbufflen - 6, dos_full);
+      memcpy(dos_full, reqbuff + 6, cplen);
+      dos_full[cplen] = 0; }
     lostring(dos_full, -1);
     charreplace(dos_full, '\\', '/');
 
@@ -1044,7 +1059,7 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
         DBG("LFN_TRUENAME -> '%s'\n", outp);
       }
     }
-  } else if ((query == AL_LFN_MKDIR) && (reqbufflen >= 3)) { /* 0x49 */
+  } else if ((query == AL_LFN_MKDIR) && (reqbufflen >= 2)) { /* 0x49 */
     /* req: LFNSTR full dir path. Creates the directory under its REAL long
      * name (a classic 39h pass-down would 8.3-mangle it). resp: AX only. */
     char dlfn[260], dirpart[512], leaf[260], resolved[512], full[1300];
@@ -1062,9 +1077,14 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
       if ((leaf[0] == 0) || (stat(resolved, &st) != 0) || (!S_ISDIR(st.st_mode))) {
         *ax = 3; /* parent path not found */
       } else {
+        char exist[256];
         snprintf(full, sizeof(full), "%s/%s", resolved, leafd);
-        if (stat(full, &st) == 0) {
-          *ax = 5; /* already exists */
+        if ((stat(full, &st) == 0) ||
+            (resolve_component(resolved, leaf, exist, NULL) == 0)) {
+          /* exists -- incl. a case-insensitive match (Win95: creating "foo"
+           * next to "Foo" fails with error 5; a POSIX fs would happily make a
+           * case-duplicate DOS cannot address) */
+          *ax = 5;
         } else if (mkdir(full, 0777) != 0) {
           *ax = (errno == ENOENT) ? 3 : 5;
         }
@@ -1096,9 +1116,22 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
       if ((stat(oldfull, &st) != 0) || (leaf[0] == 0)) {
         *ax = 2; /* source not found */
       } else {
+        char exist[256], existfull[1300];
+        struct stat sold, snew;
         snprintf(newfull, sizeof(newfull), "%s/%s", resolved, leafd);
         if (stat(newfull, &st) == 0) {
           *ax = 5; /* target exists: DOS rename must fail, not overwrite */
+        } else if ((resolve_component(resolved, leaf, exist, NULL) == 0) &&
+                   (snprintf(existfull, sizeof(existfull), "%s/%s", resolved,
+                             exist) > 0) &&
+                   (stat(existfull, &snew) == 0) &&
+                   ((stat(oldfull, &sold) != 0) ||
+                    (sold.st_ino != snew.st_ino) ||
+                    (sold.st_dev != snew.st_dev))) {
+          /* a DIFFERENT file already exists under a case-insensitive match of
+           * the target (Win95 error 5); a pure case-rename of the same inode
+           * ("foo.txt" -> "FOO.txt") stays allowed */
+          *ax = 5;
         } else if (rename(oldfull, newfull) != 0) {
           *ax = (errno == ENOENT) ? 3 : ((errno == EXDEV) ? 0x11 : 5);
         }
@@ -1246,6 +1279,12 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
         }
       }
     }
+  } else if ((query >= 0x40) && (query <= 0x4E)) {
+    /* An opcode in the LFN namespace whose payload failed its length guard:
+     * answer with a DOS error instead of falling into the silent drop below.
+     * A silent drop makes the client retransmit 5x and fail an entire user
+     * operation (the empty-path TRUENAME bug was exactly this class). */
+    *ax = 1;
   } else { /* unknown query - ignore */
     return (-1);
   }

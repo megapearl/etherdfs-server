@@ -1542,7 +1542,11 @@ static void lfn_do_misc(void) {
      * long via 0x4D CL=2 and write to caller DS:SI in the same form. */
     unsigned char far *dst = MK_FP(glob_intregs.w.ds, glob_intregs.w.si);
     unsigned short l1 = 0, skip;
-    while ((glob_lfn_openpath[l1] != 0) && (l1 < 254)) l1++;
+    /* scan bound = the buffer's own size: 254 exceeded the 128-byte
+     * glob_lfn_openpath and could read adjacent resident globals if the
+     * classic 47h ever left it unterminated */
+    while ((glob_lfn_openpath[l1] != 0) &&
+           (l1 < sizeof(glob_lfn_openpath) - 2)) l1++;
     sb[0] = 2;
     sb[1] = (unsigned char)((l1 + 1) & 0xff);
     sb[2] = (unsigned char)(((l1 + 1) >> 8) & 0xff);

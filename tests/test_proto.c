@@ -479,6 +479,84 @@ int main(int argc, char **argv) {
     printf("  OK: CP437 list + resolve + create round-trip\n");
   }
 
+  printf("=== hardening: short payloads, case-duplicates, oversized legacy ===\n");
+  {
+    unsigned char hp[520];
+    int r7;
+    /* (a) known LFN opcode with a short payload must ANSWER with an error --
+     * never silent-drop (the empty-path TRUENAME / NC bug class) */
+    hp[0] = 0x00;
+    memset(&ans, 0, sizeof(ans));
+    reqlen = build_req(frame, 0x49, hp, 1); /* mkdir with 1-byte payload */
+    r7 = process(&ans, frame, reqlen, mymac, rootarray);
+    if (r7 <= 0) {
+      printf("  FAIL: short-payload 0x49 was silently dropped (rc=%d)\n", r7);
+      return (1);
+    }
+    if ((ans.frame[58] | (ans.frame[59] << 8)) == 0) {
+      printf("  FAIL: short-payload 0x49 returned success\n");
+      return (1);
+    }
+    /* (b) MKDIR case-duplicate: "long dir name" next to "Long Dir Name" */
+    n = put_lfnstr(hp, "\\long dir name");
+    memset(&ans, 0, sizeof(ans));
+    reqlen = build_req(frame, 0x49, hp, n);
+    rc = process(&ans, frame, reqlen, mymac, rootarray);
+    if ((ans.frame[58] | (ans.frame[59] << 8)) != 5) {
+      printf("  FAIL: case-duplicate mkdir did not return AX=5 (got %d)\n",
+             ans.frame[58] | (ans.frame[59] << 8));
+      return (1);
+    }
+    /* (c) RENAME onto a case-variant of an EXISTING other file -> AX=5 */
+    n = put_lfnstr(hp, "\\readme.txt");
+    n += put_lfnstr(hp + n, "\\FILE_ID.DIZ"); /* exists as file_id.diz */
+    memset(&ans, 0, sizeof(ans));
+    reqlen = build_req(frame, 0x47, hp, n);
+    rc = process(&ans, frame, reqlen, mymac, rootarray);
+    if ((ans.frame[58] | (ans.frame[59] << 8)) != 5) {
+      printf("  FAIL: rename onto case-variant of other file != AX=5 (%d)\n",
+             ans.frame[58] | (ans.frame[59] << 8));
+      return (1);
+    }
+    /* (d) pure case-rename of the SAME file must be allowed */
+    n = put_lfnstr(hp, "\\mixedcase.txt");
+    n += put_lfnstr(hp + n, "\\MixedCase.txt");
+    memset(&ans, 0, sizeof(ans));
+    reqlen = build_req(frame, 0x47, hp, n);
+    rc = process(&ans, frame, reqlen, mymac, rootarray);
+    if ((ans.frame[58] | (ans.frame[59] << 8)) != 0) {
+      printf("  FAIL: pure case-rename refused (AX=%d)\n",
+             ans.frame[58] | (ans.frame[59] << 8));
+      return (1);
+    }
+    /* (e) oversized legacy CHDIR path (480 bytes) must not smash the stack;
+     * the clamped path simply fails to resolve -> error, and the server keeps
+     * answering afterwards */
+    memset(hp, 'A', 480);
+    memset(&ans, 0, sizeof(ans));
+    reqlen = build_req(frame, 0x05, hp, 480);
+    r7 = process(&ans, frame, reqlen, mymac, rootarray);
+    if (r7 <= 0) {
+      printf("  FAIL: oversized legacy CHDIR dropped (rc=%d)\n", r7);
+      return (1);
+    }
+    if ((ans.frame[58] | (ans.frame[59] << 8)) == 0) {
+      printf("  FAIL: oversized legacy CHDIR claimed success\n");
+      return (1);
+    }
+    /* server still alive? */
+    hp[0] = 0x37;
+    n = 1 + put_lfnstr(hp + 1, "\\readme.txt");
+    memset(&ans, 0, sizeof(ans));
+    reqlen = build_req(frame, 0x41, hp, n);
+    rc = process(&ans, frame, reqlen, mymac, rootarray);
+    if ((ans.frame[58] | (ans.frame[59] << 8)) != 0) {
+      printf("  FAIL: server wedged after oversized frame\n");
+      return (1);
+    }
+    printf("  OK: short-payload answer, case-dup mkdir/rename=5, case-rename ok, oversize clamped\n");
+  }
+
   printf("=== AL_LFN_CREATE (0x44) a 9-char-base long file ===\n");
   pl[0] = 0x20; /* cattr archive */
   pl[1] = 0x00;
