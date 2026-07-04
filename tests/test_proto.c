@@ -476,7 +476,44 @@ int main(int argc, char **argv) {
       printf("  FAIL: CP437-created file not found back\n");
       return (1);
     }
-    printf("  OK: CP437 list + resolve + create round-trip\n");
+    /* (c) the 8.3 alias of an accented name must be 7-BIT: DOS normalizes
+     * high bytes in 8.3 names on the classic path (wire-observed: 0x82->'E',
+     * 0x81->0x9A), so an alias containing them cannot round-trip through a
+     * classic open. truename CL=1 must return a pure-ASCII alias path, and
+     * that path must resolve back to the file. */
+    pl[0] = 1;
+    n = 1 + put_lfnstr(pl + 1, "\\caf\x82.txt");
+    memset(&ans, 0, sizeof(ans));
+    reqlen = build_req(frame, 0x4D, pl, n);
+    rc = process(&ans, frame, reqlen, mymac, rootarray);
+    if ((ans.frame[58] | (ans.frame[59] << 8)) != 0) {
+      printf("  FAIL: truename CL=1 on accented name errored\n");
+      return (1);
+    }
+    ln6 = ans.frame[60] | (ans.frame[61] << 8);
+    for (j6 = 0; j6 < ln6; j6++) {
+      if ((unsigned char)ans.frame[62 + j6] >= 0x80) {
+        printf("  FAIL: alias path contains a high byte (won't survive DOS "
+               "filename normalization)\n");
+        return (1);
+      }
+    }
+    {
+      char apath[280];
+      if (ln6 > 270) ln6 = 270;
+      memcpy(apath, ans.frame + 62, ln6);
+      apath[ln6] = 0;
+      pl[0] = 0x37;
+      n = 1 + put_lfnstr(pl + 1, apath);
+      memset(&ans, 0, sizeof(ans));
+      reqlen = build_req(frame, 0x41, pl, n);
+      rc = process(&ans, frame, reqlen, mymac, rootarray);
+      if ((ans.frame[58] | (ans.frame[59] << 8)) != 0) {
+        printf("  FAIL: 7-bit alias path did not resolve back (%s)\n", apath);
+        return (1);
+      }
+    }
+    printf("  OK: CP437 list + resolve + create round-trip + 7-bit alias\n");
   }
 
   printf("=== hardening: short payloads, case-duplicates, oversized legacy ===\n");

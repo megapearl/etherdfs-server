@@ -256,12 +256,18 @@ void lfn2sfn(char *sfn, const char *lfn, int collision_idx) {
       ext_idx = i;
   }
 
-  /* copy valid chars to basen (max 8) */
+  /* copy valid chars to basen (max 8). Bytes >= 0x80 (accented OEM chars)
+   * are stripped like the other invalid chars: DOS normalizes high bytes in
+   * 8.3 names through its country-dependent filename-uppercase table when a
+   * path travels the classic INT 21h route (wire-observed on PC DOS 7.1:
+   * e-acute 0x82 -> 'E' 0x45, u-diaeresis 0x81 -> 0x9A), so an alias
+   * containing them comes back as DIFFERENT bytes and no longer matches
+   * itself. A 7-bit alias survives any DOS normalization. */
   for (i = 0; lfn[i] != 0 && i != ext_idx && j < 8; i++) {
     char c = lfn[i];
     if (c == ' ' || c == '.' || c == '+' || c == ',' || c == ';' || c == '=' ||
-        c == '[' || c == ']')
-      continue; /* DOS invalid chars */
+        c == '[' || c == ']' || ((unsigned char)c >= 0x80))
+      continue; /* DOS invalid chars + high bytes */
     basen[j++] = upchar(c);
   }
 
@@ -271,8 +277,8 @@ void lfn2sfn(char *sfn, const char *lfn, int collision_idx) {
     for (i = ext_idx + 1; lfn[i] != 0 && j < 3; i++) {
       char c = lfn[i];
       if (c == ' ' || c == '.' || c == '+' || c == ',' || c == ';' ||
-          c == '=' || c == '[' || c == ']')
-        continue;
+          c == '=' || c == '[' || c == ']' || ((unsigned char)c >= 0x80))
+        continue; /* DOS invalid chars + high bytes (see basen loop) */
       extn[j++] = upchar(c);
     }
   }
