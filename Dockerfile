@@ -7,8 +7,8 @@ COPY . /opt/etherdfs
 WORKDIR /opt/etherdfs
 
 # Build and install
-ARG APP_VERSION=v0.3.11-PRO
-RUN make VERSION="${APP_VERSION}" && cp ethersrv /usr/local/bin/ethersrv && chmod +x /usr/local/bin/ethersrv
+ARG APP_VERSION=
+RUN make ${APP_VERSION:+VERSION="$APP_VERSION"} && cp ethersrv /usr/local/bin/ethersrv && chmod +x /usr/local/bin/ethersrv
 
 # Copy entrypoint
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh

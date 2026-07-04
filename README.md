@@ -184,14 +184,19 @@ the `INT 2Fh`/`INT 21h` chains — see *DOSLFN coexistence* above).
 Native build (needs `gcc`, `make`, `libpcap-dev`):
 
 ```bash
-make                    # produces ./ethersrv
+make                    # produces ./ethersrv; version is derived from git
 sudo ./ethersrv -f -v RETRO eth0 /srv/dos
 ```
 
-Or build the container:
+The version string is **not hardcoded** — `make` derives it from the git tags
+(`git describe --tags --always --dirty`). Override with `make VERSION=vX.Y.Z`
+when building outside a git checkout.
+
+Or build the container (the release build injects the version via a build arg):
 
 ```bash
-docker build -t etherdfs-server .
+docker build -t etherdfs-server .                     # version = "unknown" (no git in context)
+docker build --build-arg APP_VERSION=$(git describe --tags) -t etherdfs-server .
 ```
 
 ### Client (DOS TSR)
@@ -200,14 +205,15 @@ The 16-bit client is built with the **OpenWatcom v2** cross-compiler. A helper
 script drives a containerized build (no host toolchain needed):
 
 ```bash
-# see client/build-linux.sh -- runs OpenWatcom in a container and emits
-# client/bin/ETHERDFS.EXE
-sh client/build-linux.sh v1.0.0
+# runs OpenWatcom in a container and emits client/bin/ETHERDFS.EXE. The
+# optional version arg is stamped into the banner (pass a git tag); without
+# it the client reports "unknown".
+sh client/build-linux.sh "$(git describe --tags)"
 ```
 
 Prebuilt binaries for both halves are committed under
-[`client/bin/`](client/bin/) (DOS `ETHERDFS.EXE`) and [`bin/`](bin/)
-(the Linux `ethersrv` daemon) for convenience.
+[`client/bin/`](client/bin/) (DOS `ETHERDFS.EXE`) and [`bin/`](bin/) (the
+Linux `ethersrv` daemon), built from the current release tag for convenience.
 
 ---
 

@@ -67,7 +67,7 @@
 
 /* program version */
 #ifndef PVER
-#define PVER "v0.3.11-PRO"
+#define PVER "unknown" /* real version injected via -DPVER (Makefile: git describe) */
 #endif
 
 /* protocol version (single byte, must be in sync with etherdfs) */

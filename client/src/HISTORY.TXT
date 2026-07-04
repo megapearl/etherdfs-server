@@ -1,6 +1,19 @@
 EtherDFS changelog history
 
---- Donald Flissinger fork (v0.1.0-dev line) ---
+--- Donald Flissinger fork ---
+
+v1.1.0 [2026-07-05] -- first stable release with native Long File Name support:
+ - Full Win95-style LFN on the mapped drive (client TSR hooking INT 21h/71xx +
+   additive server wire-opcodes 0x40-0x4E): DIR shows real long names; open/
+   copy/REN/DEL/MD/RD/CD/ATTRIB/truename accept long names and long directory
+   components. Classic 8.3 path unchanged (backward compatible).
+ - OEM codepage conversion (CP437 default, CP850 via ETHERDFS_CODEPAGE): names
+   are UTF-8 on disk, OEM on the wire; 8.3 aliases kept 7-bit so they survive
+   DOS filename normalization. DOSLFN coexistence (load DOSLFN first).
+ - Hardening: clamped legacy path copies, no silent-drop on short LFN payloads,
+   case-duplicate mkdir/rename rejection, correct top-of-chain /U unload check.
+ - Validated on real hardware (PC DOS 7.10 + 4DOS 8.00 + Norton/Volkov).
+
 
 fork [2026-07-02] -- native LFN, Phase-2 increment 3: open/create with long
 names (validated on real hardware; open/type/copy/create of long-named files
