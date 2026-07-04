@@ -1261,7 +1261,15 @@ static void lfn_do_find(void) {
       glob_lfn_find[slot].mask[k] = 0;
     else
       glob_lfn_find[slot].mask[0] = 0; /* >63 chars: don't send a partial mask */
-    rc = sendquery(AL_LFN_FINDFIRST, glob_lfn_drv, plen, &ans, &rax, 0);
+    { /* FindFirst is idempotent (server regenerates the listing at nth==0);
+         retry once more on a total timeout so a single missed reply is not
+         reported to the shell as an empty directory ("File not found") */
+      unsigned char att;
+      for (att = 0; att < 2; att++) {
+        rc = sendquery(AL_LFN_FINDFIRST, glob_lfn_drv, plen, &ans, &rax, 0);
+        if (rc != 0xffffu) break;
+      }
+    }
   } else { /* FINDNEXT */
     unsigned short i;
     sb[0] = (unsigned char)(glob_lfn_find[slot].dirss & 0xff);
@@ -1310,14 +1318,23 @@ static unsigned short lfn_send_truename(unsigned char subfn,
                                         unsigned char **ansp,
                                         unsigned short **raxp) {
   unsigned char *sb = glob_pktdrv_sndbuff + 60;
-  unsigned short n = 0;
+  unsigned short n = 0, rc;
+  unsigned char att;
   if ((path[0] != 0) && (path[1] == ':')) path = path + 2; /* strip "X:" */
   while ((path[n] != 0) && (n < 255)) { sb[3 + n] = path[n]; n++; }
+  if (n == 0) { sb[3] = '\\'; n = 1; } /* bare "X:" -> root, never send an
+                          empty path (an old/short-guarded server drops it) */
   sb[0] = subfn;
   sb[1] = (unsigned char)(n & 0xff);
   sb[2] = (unsigned char)((n >> 8) & 0xff);
-  return sendquery(AL_LFN_TRUENAME, glob_lfn_drv, (unsigned short)(3 + n),
+  /* truename is idempotent: retry once more on a total timeout so a single
+     missed reply does not surface as a spurious error to the caller */
+  for (att = 0; att < 2; att++) {
+    rc = sendquery(AL_LFN_TRUENAME, glob_lfn_drv, (unsigned short)(3 + n),
                    ansp, raxp, 0);
+    if (rc != 0xffffu) break;
+  }
+  return rc;
 }
 
 /* 716Ch open/create, part 1 of 2 -- the server work. Runs ON THE RESIDENT
@@ -2788,7 +2805,19 @@ int main(int argc, char **argv) {
     int2fptr = (unsigned char far *)MK_FP(myseg, myoff) + 24; /* the interrupt handler's signature appears at offset 24 (this might change at each source code modification) */
     /* look for the "MVet" signature */
     if ((int2fptr[0] != 'M') || (int2fptr[1] != 'V') || (int2fptr[2] != 'e') || (int2fptr[3] != 't')) {
-      #include "msg\\othertsr.c";
+      /* report WHICH handler now owns INT 2Fh (myseg:myoff) so it can be
+       * matched against MEM /D -- a TSR loaded/hooked after us (a network
+       * redirector, a telnet server, a resident file manager, ...). */
+      char hx[12];
+      outmsg("EtherDFS cannot be unloaded: INT 2Fh now owned by $");
+      byte2hex(hx + 0, (unsigned char)(myseg >> 8));
+      byte2hex(hx + 2, (unsigned char)(myseg & 0xff));
+      hx[4] = ':';
+      byte2hex(hx + 5, (unsigned char)(myoff >> 8));
+      byte2hex(hx + 7, (unsigned char)(myoff & 0xff));
+      hx[9] = '$';
+      outmsg(hx);
+      outmsg(" (a later TSR). Unload it first, or reboot.\r\n$");
       return(1);
     }
     /* also confirm we are still the top of the INT 21h chain (signature
@@ -2814,7 +2843,20 @@ int main(int argc, char **argv) {
         if ((int21fptr[k] == 'M') && (int21fptr[k + 1] == 'V') && (int21fptr[k + 2] == '2') && (int21fptr[k + 3] == '1')) break;
       }
       if (k >= 96) {
-        outmsg("EtherDFS cannot be unloaded: another TSR hooked INT 21h after it.\r\n$");
+        {
+          /* report WHICH handler now owns INT 21h (s21:o21) so it can be
+           * matched against MEM /D -- it is a TSR loaded/hooked after us. */
+          char hx[12];
+          outmsg("EtherDFS cannot be unloaded: INT 21h now owned by $");
+          byte2hex(hx + 0, (unsigned char)(s21 >> 8));
+          byte2hex(hx + 2, (unsigned char)(s21 & 0xff));
+          hx[4] = ':';
+          byte2hex(hx + 5, (unsigned char)(o21 >> 8));
+          byte2hex(hx + 7, (unsigned char)(o21 & 0xff));
+          hx[9] = '$';
+          outmsg(hx);
+          outmsg(" (a later TSR). Unload it first, or reboot.\r\n$");
+        }
         return(1);
       }
     }
