@@ -132,12 +132,14 @@ cython_debug/
 
 .dockerignore
 
-# Compiled Server Binaries
+# Build artifacts (the make output lands in the repo root; the *distributed*
+# daemon binary is committed at bin/ethersrv instead).
+/ethersrv
 ethersrv-linux
 test_sfn
 
-# Compiled Client Binaries and Output
-client/bin/ETHERDFS.EXE
+# Client build intermediates (the distributed DOS binary is committed at
+# client/bin/ETHERDFS.EXE).
 *.err
 *.map
 *.obj

@@ -1,7 +1,7 @@
 # EtherDFS Long Filename (LFN) Support — Design & Phased Implementation Plan
 
 **Status:** Proposed
-**Repo:** `/mnt/storage/projects/etherdfs-server/` (server `ethersrv.c`/`fs.c`/`fs.h`; client `client/src/`)
+**Repo:** the repository root (server `ethersrv.c`/`fs.c`/`fs.h`; client `client/src/`)
 **Baseline:** server+client HEAD `4f82889`; client `PVER 0.8.2`, `PROTOVER 2` (`VERSION.H:6`)
 
 ---

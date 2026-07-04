@@ -1,124 +1,241 @@
-# EtherDFS Server for Docker
+# EtherDFS Server for Docker — with native Long File Name support
 
-A lightweight, containerized version of the **EtherDFS Server** (`ethersrv`), heavily optimized to run on modern NAS systems like **TrueNAS Scale** and other Linux Docker environments.
+A lightweight, containerized **EtherDFS Server** (`ethersrv`) that lets a
+vintage MS-DOS PC mount a folder from a modern Linux/NAS host as a local drive
+letter over **raw Ethernet** — no TCP/IP stack required on the DOS side.
 
-This repository hosts a fork based on [oerg866/ethersrv-866](https://github.com/oerg866/ethersrv-866), an actively maintained version of the original [EtherDFS by Mateusz Viste](http://etherdfs.sourceforge.net/).
+This is a fork of [oerg866/ethersrv-866](https://github.com/oerg866/ethersrv-866)
+(itself a fork of the original [EtherDFS by Mateusz Viste](http://etherdfs.sourceforge.net/)),
+optimized for **TrueNAS SCALE / ZFS** and extended with a full **Win95-style
+Long File Name (LFN) implementation** — both the Linux daemon *and* a matching
+DOS client TSR live in this repository.
 
-## 🌟 Key Improvements in this Version
-* **TrueNAS/ZFS 8.3 SFN Compatibility:** Added a custom algorithm to generate DOS-compatible 8.3 Short File Names (`~1`) on the fly. This prevents DOS clients from crashing or failing to access files with long names, spaces, or lowercase letters on case-sensitive filesystems like ZFS. 
-* **Native Long File Name (LFN) support:** With the bundled client (`client/`), DOS gets the full Win95-style LFN API on the mapped drive: `DIR` shows real long names, and open/copy/`ren`/`del`/`md`/`rd`/`cd`/`attrib`/truename all accept long names and long directory components (INT 21h `71xx` served by the client TSR; additive wire opcodes `0x40-0x4E`). Works alongside DOSLFN (load DOSLFN first, EtherDFS last): DOSLFN keeps serving local FAT drives, EtherDFS serves its own network drives. Tested with 4DOS 8.00 + PC DOS 7.10 + Norton Commander.
-* **OEM codepage conversion:** Filenames are stored as UTF-8 on the NAS but travel the wire in the DOS OEM codepage (CP437 by default, CP850 via `ETHERDFS_CODEPAGE`), so accented names (`Café Menü.txt`) display and round-trip correctly on both sides. Unmappable characters degrade to `_`.
-* **Huge Directory Support:** Removed the rigid 1024-file limit for Short File Name caching. The server now dynamically allocates memory to reliably support gigantic DOS collections (like eXoDOS with 3500+ items per directory) without returning "Invalid directory" errors.
-* **Adjustable Output Delay:** Added an optional delay parameter (`ETHERDFS_DELAY`) to slow down server packet transmission, preventing buffer overruns on vintage 8086/XT network cards (like the NE2000).
-* **Dynamic Volume Labels:** Serve custom volume labels to your DOS machine (e.g. `RETRO`) via the `VOLUME_LABEL` environment variable.
-* **Runtime Debugging:** Easily inspect DOS file operations and client connections by setting `ETHERDFS_DEBUG=1` without being overwhelmed by raw ethernet frame hexadecimal dumps. 
-* **Standalone Docker Support:** Includes an intelligent `entrypoint.sh` script to wait for physical interfaces to come online before starting, preventing container crash loops. 
+> **Highlights of this fork:** true long filenames on the DOS side (not just
+> 8.3 aliases), OEM codepage conversion for accented names, deterministic
+> `~1` short-name generation on case-sensitive filesystems, unlimited
+> directory sizes, and a hardened wire protocol — all validated on real
+> hardware (PC DOS 7.10 + 4DOS + Norton/Volkov Commander).
+
+---
+
+## 🌟 Key features
+
+* **Native Long File Name (LFN) support** *(this fork)* — with the bundled DOS
+  client (`client/`), DOS gets the full Win95 LFN API on the mapped drive:
+  `DIR` shows real long names, and open/copy/`REN`/`DEL`/`MD`/`RD`/`CD`/`ATTRIB`
+  and truename all accept long names *and* long intermediate directory
+  components. Served by the client TSR hooking `INT 21h/71xx`, backed by
+  additive server wire-opcodes (`0x40`–`0x4E`) that an older server safely
+  ignores.
+* **DOSLFN coexistence** — load DOSLFN first and EtherDFS second, and they
+  cooperate cleanly: DOSLFN keeps serving local FAT drives while EtherDFS
+  serves its own network drives (it chains other drives down to DOSLFN).
+* **OEM codepage conversion** — names are stored UTF-8 on the host but travel
+  the wire in the DOS OEM codepage (**CP437** default, **CP850** via
+  `ETHERDFS_CODEPAGE`), so accented names such as `Café Menü.txt` display and
+  round-trip correctly. Unmappable characters degrade to `_`; 8.3 aliases are
+  kept pure 7-bit so they survive DOS's own filename normalization.
+* **TrueNAS/ZFS 8.3 SFN compatibility** — a deterministic algorithm generates
+  DOS-compatible 8.3 short names (`NAME~1.TXT`) on the fly for long/spaced/
+  lowercase names on case-sensitive filesystems, so classic DOS tools never
+  crash or fail to open them.
+* **Huge directory support** — no fixed 1024-file limit; the server allocates
+  dynamically to serve gigantic collections (e.g. eXoDOS, 3500+ items/dir).
+* **Adjustable output delay** (`ETHERDFS_DELAY`) — throttle transmission for
+  vintage 8086/XT ISA NICs (NE2000/RTL8019) that overflow at Gigabit speeds.
+* **Dynamic volume labels** (`VOLUME_LABEL`).
+* **Standalone Docker support** — an `entrypoint.sh` that waits for the
+  physical interface to appear, preventing container crash-loops.
 
 ## 📖 What is EtherDFS?
-EtherDFS creates a **Layer 2 (Raw Ethernet)** drive mapping for MS-DOS clients. It allows an old PC (8086 to Pentium) to mount a folder from your modern NAS as a local drive letter (e.g., `E:`), without requiring a heavy TCP/IP stack.
+
+EtherDFS creates a **Layer-2 (raw Ethernet)** drive mapping for MS-DOS clients.
+An old PC (8086 → Pentium) mounts a host folder as a drive letter (e.g. `E:`)
+using nothing but a packet driver and a ~14 KB TSR.
 
 ```mermaid
 graph TD
     A[MS-DOS PC] -- "Raw Ethernet Frames (0xEDF5)" --> B(Network Switch)
-    B -- "Raw Ethernet Frames" --> C["TrueNAS Interface (eno1/vlan2)"]
-    C -- "Host Networking" --> D[Docker Container]
-    D -- "Bind Mount" --> E[ZFS Dataset]
+    B -- "Raw Ethernet Frames" --> C["Linux/TrueNAS interface (eth0/vlan2)"]
+    C -- "Host Networking" --> D[Docker Container: ethersrv]
+    D -- "Bind Mount" --> E[Dataset / Folder]
 ```
 
-## ⚠️ Critical Networking Requirements
+---
 
-EtherDFS operates entirely on **Layer 2**. It does **not** use IP addresses (no IP, no Subnet, no Gateway).
+## 🔤 Long File Names — how it works
 
-1. **Network Mode: Host**: You **MUST** use `network_mode: host` in Docker.
-   * Bridge mode or NAT will block the raw Ethernet frames.
-   * Port mapping (`-p 80:80`) is not applicable here.
+Classic EtherDFS is an 8.3-only redirector. This fork adds LFN in two halves
+that ship together:
 
-2. **Physical Interface**: You must bind the application to the *actual* network interface of the host that is connected to the DOS machine's switch (e.g., `eno1`, `eth0`, `br0`, `vlan2`).
+| Half | Where | What it does |
+| :--- | :--- | :--- |
+| **Server** | `ethersrv.c` / `fs.c` | Answers additive LFN wire-opcodes `0x40`–`0x4E` (FindFirst/Next, Open, Create, Rename, Mkdir, TrueName, VolInfo), generates deterministic `~1` aliases, and converts names between UTF-8 (disk) and the OEM codepage (wire). |
+| **Client** | `client/` (`ETHERDFS.EXE`) | A resident TSR that hooks `INT 21h` and serves the Win95 LFN API (`71xx`) for its own drives — `714E/714F` FindFirst/Next, `716C` open/create, `7160` truename, `7156/7141/7139/713A/713B/7143/7147` ren/del/md/rd/cd/attrib/getcwd — translating them to the server opcodes or passing them down as 8.3 aliases. |
 
-## 🚀 Docker Setup
+What works on the DOS side once both are loaded:
 
-### docker-compose.yml 
+* `DIR` shows the real long names (with spaces, mixed case, accents).
+* `COPY`, `TYPE`, `REN`, `DEL`, `MD`, `RD`, `CD`, `ATTRIB` all accept long
+  names and long directory components (e.g. `COPY x.txt "E:\My Long Dir\"`).
+* Long-aware shells and file managers (4DOS, Norton/Volkov Commander) see
+  long names natively.
+
+The 8.3 world keeps working unchanged: `COMMAND.COM` and legacy tools still get
+stable `NAME~1.EXT` aliases for every long name.
+
+### DOSLFN coexistence & load order
+
+If you also use [DOSLFN](https://www.freedos.org/) for long names on *local*
+FAT drives, load it **before** EtherDFS:
+
+```bat
+DOSLFN.COM            REM local FAT drives get LFN from DOSLFN
+...
+ETHERDFS.EXE :: C-E   REM network drive(s) get LFN from EtherDFS (load last)
+```
+
+EtherDFS installs on top of the `INT 21h` chain and serves LFN for *its* drives
+only, chaining every other drive down to DOSLFN. (Loading EtherDFS last also
+lets it cleanly unload itself with `ETHERDFS.EXE /U`, provided no other TSR —
+a telnet server, a resident file manager — hooked `INT 2Fh`/`INT 21h` after it.)
+
+---
+
+## ⚠️ Networking requirements
+
+EtherDFS is pure **Layer 2** — no IP, no subnet, no gateway.
+
+1. **`network_mode: host`** in Docker. Bridge/NAT drops the raw frames; port
+   mapping does not apply.
+2. **Bind to the real interface** connected to the DOS machine's switch
+   (`eth0`, `eno1`, `br0`, `vlan2`, …). The DOS PC and the host must share the
+   same Layer-2 segment (VLAN).
+
+## 🚀 Docker setup
+
+### docker-compose.yml
 
 ```yaml
 services:
   etherdfs:
-    image: ghcr.io/megapearl/etherdfs:latest
+    image: ghcr.io/megapearl/etherdfs-server:latest
     container_name: etherdfs-server
-    # CRITICAL: Must be host mode to receive raw frames
-    network_mode: host
-    # Capabilities needed to open raw sockets
+    network_mode: host          # REQUIRED for raw frames
     cap_add:
       - NET_RAW
       - NET_ADMIN
     environment:
-      # Set to your primary network interface connected to the DOS machine
-      - INTERFACE=vlan2
-      # Provide a custom 11-character DOS volume label (Optional)
-      - VOLUME_LABEL=RETRO
-      # Enable verbose logging of file operations (Optional, 0 or 1)
-      - ETHERDFS_DEBUG=0
-      # Slow down packet transmission for older XT network cards (milliseconds) 
-      - ETHERDFS_DELAY=0
+      - INTERFACE=vlan2         # host NIC facing the DOS machine
+      - VOLUME_LABEL=RETRO      # optional, max 11 chars
+      - ETHERDFS_CODEPAGE=437   # 437 (default) or 850
+      - ETHERDFS_DEBUG=0        # keep 0 in production (see table below)
+      - ETHERDFS_DELAY=0        # raise for vintage ISA NICs
     volumes:
-      # Format: /path/on/host:/data
-      - /mnt/tank/retro/dos_games:/data
+      - /mnt/tank/retro/dos_games:/data   # host folder -> /data
     restart: unless-stopped
 ```
 
-## ⚙️ Environment Variables
+## ⚙️ Environment variables
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| `INTERFACE` | `vlan2` | The physical network interface name on the docker host (e.g., `eth0`, `vlan2`). The container will wait gracefully if the interface doesn't exist yet. |
-| `VOLUME_LABEL` | `(directory name)`| An optional custom DOS Volume Label (max 11 chars). If omitted, the root directory name is capitalized and used. |
-| `ETHERDFS_DEBUG`| `0` | Set to `1` to enable verbose logging of DOS operations (`AL_OPEN`, `AL_READ`, `AL_FINDNEXT`) to stdout. Excellent for troubleshooting. **Do not leave enabled in production**: the per-query output is large, and if the Docker log driver applies backpressure the (single-threaded) server blocks on `write()` for seconds, which DOS clients experience as timeouts ("File not found", drive errors). |
-| `ETHERDFS_CODEPAGE`| `437` | OEM codepage used to convert filenames between the UTF-8 filesystem and the DOS wire. Supported: `437` (US/Western, default) and `850` (Latin-1). |
-| `ETHERDFS_DELAY`| `0` | Artificial network transmission delay in milliseconds (e.g. `5` or `10`). Increase this if your DOS PC crashes or halts during large file transfers due to full NIC buffers. |
+| `INTERFACE` | `vlan2` | Host NIC name (e.g. `eth0`, `vlan2`). The container waits gracefully if it doesn't exist yet. |
+| `VOLUME_LABEL` | *(dir name)* | Optional DOS volume label (max 11 chars). |
+| `ETHERDFS_CODEPAGE` | `437` | OEM codepage for wire↔disk filename conversion. `437` (US/Western) or `850` (Latin-1). |
+| `ETHERDFS_DEBUG` | `0` | `1` = verbose per-operation logging to stdout. **Leave `0` in production**: the output is large, and if the Docker log driver applies backpressure the single-threaded server blocks on `write()` for seconds, which DOS clients see as timeouts (spurious "File not found", drive errors). |
+| `ETHERDFS_DELAY` | `0` | Artificial TX delay in ms. Raise (e.g. `5`) if a vintage NIC's buffers overflow during large transfers. |
 
-*(Note: The container expects the shared directory to be mounted exactly at `/data`).*
+*(The shared folder must be mounted exactly at `/data`.)*
 
-## 🔧 Troubleshooting & Common Issues
+---
 
-### 1. "Error: failed to scan dir" / Empty Drive on Client
-This is almost always a **Permissions** issue on the Host (TrueNAS).
-* **Cause:** The container runs as root, but TrueNAS NFSv4 ACLs might still block access.
-* **Fix:** Ensure the underlying dataset is readable.
-```bash
-# Run on TrueNAS Shell
-chmod -R 755 /mnt/tank/retro
-```
+## 💾 Client setup (MS-DOS)
 
-### 2. Client crashes or locks up while reading large files
-Older XT machines with ISA network cards (like the NE2000 or RTL8019) can sometimes have their buffers overflowed by the speed of modern Gigabit NAS servers.
-* **Fix:** Set `ETHERDFS_DELAY=5` in your `docker-compose.yml` to slow down the server's response rate slightly. 
+You need two things on the vintage PC:
 
-## 💾 Client Setup (MS-DOS)
+1. A **packet driver** for your NIC (`NE2000.COM`, `3C509.COM`, `E100BPKT.COM`, …).
+2. The **EtherDFS client** — a prebuilt `ETHERDFS.EXE` ships in
+   [`client/bin/`](client/bin/).
 
-On your vintage PC, you need two things:
-
-1. A **Packet Driver** for your network card (e.g., `NE2000.COM`, `3C509.COM`).
-2. The **EtherDFS Client** (`ETHERDFS.EXE`).
-
-### `AUTOEXEC.BAT` Example
+### AUTOEXEC.BAT example
 
 ```bat
 @ECHO OFF
-REM 1. Load your packet driver (vector 0x60 is standard)
-C:\APPS\NET\3C509.COM 0x60
+REM 1. Load the packet driver (vector 0x60 is conventional)
+C:\NET\3C509.COM 0x60
 
-REM 2. Load EtherDFS (automatically finds the server)
-REM Syntax: ETHERDFS SRVMAC rdrv-ldrv
-C:\APPS\ETHERDFS\ETHERDFS.EXE :: C-E
+REM 2. (optional) DOSLFN for LFN on LOCAL FAT drives -- load BEFORE EtherDFS
+C:\NET\DOSLFN.COM
+
+REM 3. Load EtherDFS -- ":: " auto-discovers the server; "C-E" maps remote C: to local E:
+C:\NET\ETHERDFS\ETHERDFS.EXE :: C-E
 ```
 
-If successful, you will see output similar to:
-```text
-EtherDFS v0.8.3 installed (local MAC 00:A0:24:99:7E:7A, pktdrvr at INT 60)
-E: -> [C:] on 00:50:56:85:89:9D
+`ETHERDFS.EXE /U` unloads the resident driver (only if it is still on top of
+the `INT 2Fh`/`INT 21h` chains — see *DOSLFN coexistence* above).
+
+---
+
+## 🛠️ Building from source
+
+### Server (Linux daemon)
+
+Native build (needs `gcc`, `make`, `libpcap-dev`):
+
+```bash
+make                    # produces ./ethersrv
+sudo ./ethersrv -f -v RETRO eth0 /srv/dos
 ```
 
-## 📜 Credits
+Or build the container:
 
-* **Original Author:** [Mateusz Viste](https://etherdfs.sourceforge.net/)
-* **Linux/FreeBSD Fork:** [Michael Ortmann](https://github.com/oerg866/ethersrv-866/)
-* **Dockerization & SFN Enhancements:** [Donald Flissinger](https://github.com/megapearl/etherdfs/)
+```bash
+docker build -t etherdfs-server .
+```
+
+### Client (DOS TSR)
+
+The 16-bit client is built with the **OpenWatcom v2** cross-compiler. A helper
+script drives a containerized build (no host toolchain needed):
+
+```bash
+# see client/build-linux.sh -- runs OpenWatcom in a container and emits
+# client/bin/ETHERDFS.EXE
+sh client/build-linux.sh v1.0.0
+```
+
+Prebuilt binaries for both halves are committed under
+[`client/bin/`](client/bin/) (DOS `ETHERDFS.EXE`) and [`bin/`](bin/)
+(the Linux `ethersrv` daemon) for convenience.
+
+---
+
+## 🔧 Troubleshooting
+
+**"Error: failed to scan dir" / empty drive** — almost always host permissions.
+Ensure the dataset is readable by the container (which runs as root):
+```bash
+chmod -R 755 /mnt/tank/retro
+```
+
+**Client locks up during large transfers** — a vintage ISA NIC being
+out-run by a Gigabit host. Set `ETHERDFS_DELAY=5` (or higher).
+
+**Intermittent "File not found" / drive errors under load** — check that
+`ETHERDFS_DEBUG` is `0`. Verbose logging under heavy client traffic can stall
+the (single-threaded) server via log-driver backpressure.
+
+**Accented name shows as `_` or won't open** — set `ETHERDFS_CODEPAGE` to
+match your DOS box's active codepage (`437` or `850`).
+
+---
+
+## 📜 Credits & license
+
+* **Original author:** [Mateusz Viste](https://etherdfs.sourceforge.net/) — EtherDFS + `ethersrv-linux`
+* **Linux/FreeBSD fork:** [Michael Ortmann (oerg866)](https://github.com/oerg866/ethersrv-866/)
+* **Dockerization, ZFS/8.3 SFN, LFN + codepage fork:** [Donald Flissinger](https://github.com/megapearl/etherdfs-server/)
+
+Distributed under the **MIT License** — see [`LICENSE`](LICENSE). The 8.3-alias,
+LFN and codepage additions are contributed under the same terms.
