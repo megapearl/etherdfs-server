@@ -63,6 +63,14 @@ int findfile(struct fileprops *f, unsigned short dss, char *fcbtmpl,
 /* Resolve one path component (long name OR 8.3 alias, case-insensitive)
  * inside dir_path; fills out_real (>=256) and optionally out_sfn (>=14,
  * display alias). Returns 0 on match, -1 otherwise. */
+/* Select the active OEM codepage for wire<->disk name conversion ("437"
+ * default, "850"); NULL/unknown -> CP437. Call once at startup (increment 6). */
+void cp_init(const char *name);
+/* UTF-8 disk name -> OEM wire bytes (<= input length). */
+void cp_disk2wire(const char *utf8, char *out, int outsz);
+/* OEM wire bytes -> UTF-8 disk name (up to 3x input; size the buffer). */
+void cp_wire2disk(const char *cp, char *out, int outsz);
+
 int resolve_component(const char *dir_path, const char *wire_name,
                       char *out_real, char *out_sfn);
 

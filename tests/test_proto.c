@@ -429,6 +429,56 @@ int main(int argc, char **argv) {
     printf("  OK: long parents, truename round-trip, mkdir/rename-long, dotdirs, empty-truename\n");
   }
 
+  printf("=== increment 6: OEM codepage (CP437) wire<->disk ===\n");
+  {
+    int ln6, j6, has82, hasC3;
+    /* (a) 'caf\xc3\xa9.txt' exists on disk as UTF-8; the client asks for it by
+     * its CP437 name "caf\x82.txt" (0x82 == e-acute in CP437). Must resolve, and
+     * the long name handed back must be CP437 (0x82), never UTF-8 (0xC3 0xA9). */
+    pl[0] = 0x37;
+    n = 1 + put_lfnstr(pl + 1, "\\caf\x82.txt");
+    memset(&ans, 0, sizeof(ans));
+    reqlen = build_req(frame, 0x41, pl, n);
+    rc = process(&ans, frame, reqlen, mymac, rootarray);
+    if ((ans.frame[58] | (ans.frame[59] << 8)) != 0) {
+      printf("  FAIL: CP437 name did not resolve the UTF-8 disk file\n");
+      return (1);
+    }
+    ln6 = ans.frame[93] | (ans.frame[94] << 8);
+    has82 = 0; hasC3 = 0;
+    for (j6 = 0; j6 < ln6; j6++) {
+      unsigned char c = (unsigned char)ans.frame[95 + j6];
+      if (c == 0x82) has82 = 1;
+      if (c == 0xC3) hasC3 = 1;
+    }
+    if (!has82 || hasC3) {
+      printf("  FAIL: long name not CP437 (has82=%d hasC3=%d)\n", has82, hasC3);
+      return (1);
+    }
+    /* (b) create via a CP437 name (ni<0xA4>o6.txt, 0xA4 == n-tilde), then find it
+     * back -- proves wire->disk on create + disk->wire on the subsequent list. */
+    pl[0] = 0x20; pl[1] = 0x00;
+    n = 2 + put_lfnstr(pl + 2, "\\ni\xa4o6.txt");
+    memset(&ans, 0, sizeof(ans));
+    reqlen = build_req(frame, 0x44, pl, n);
+    rc = process(&ans, frame, reqlen, mymac, rootarray);
+    if ((ans.frame[58] | (ans.frame[59] << 8)) != 0) {
+      printf("  FAIL: CP437 create errored (AX=%d)\n",
+             ans.frame[58] | (ans.frame[59] << 8));
+      return (1);
+    }
+    pl[0] = 0x37;
+    n = 1 + put_lfnstr(pl + 1, "\\ni\xa4o6.txt");
+    memset(&ans, 0, sizeof(ans));
+    reqlen = build_req(frame, 0x41, pl, n);
+    rc = process(&ans, frame, reqlen, mymac, rootarray);
+    if ((ans.frame[58] | (ans.frame[59] << 8)) != 0) {
+      printf("  FAIL: CP437-created file not found back\n");
+      return (1);
+    }
+    printf("  OK: CP437 list + resolve + create round-trip\n");
+  }
+
   printf("=== AL_LFN_CREATE (0x44) a 9-char-base long file ===\n");
   pl[0] = 0x20; /* cattr archive */
   pl[1] = 0x00;

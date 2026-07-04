@@ -496,7 +496,7 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
     /* I do nothing, except lying that lock/unlock succeeded */
   } else if (query == AL_FINDFIRST) { /* 0x1B */
     struct fileprops fprops;
-    char directory[256];
+    char directory[512]; /* resolve_path writes up to RESOLVE_MAX(512) */
     unsigned short dirss;
     char filemask[16], filemaskfcb[12];
     unsigned fattr;
@@ -811,8 +811,9 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
                                  while SPOPNFIL is a combination of both with
                                  extra flags */
     struct fileprops fprops;
-    char directory[256];
+    char directory[512]; /* resolve_path writes up to RESOLVE_MAX(512) */
     char fname[16], fnamefcb[12];
+    char *rleaf; /* on-disk leaf inside fullpathname (see below) */
     char fullpathname[512];
     int fileres;
     unsigned short stackattr, actioncode, spopen_openmode, spopres = 0;
@@ -839,6 +840,14 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
 
     /* resolve the parent directory specifically */
     resolve_path(directory, root, dos_dir);
+    /* The on-disk leaf: taken from the RESOLVED full path, not the raw wire
+     * leaf. resolve_path already maps an existing file to its true disk name
+     * and a nonexistent one through cp_wire2disk (OEM->UTF-8, increment 6);
+     * creating with the raw OEM leaf would put raw high bytes on a UTF-8
+     * filesystem AND diverge from the path the fileid is registered under
+     * (getitemss(fullpathname)), breaking subsequent read/write/close. */
+    rleaf = fullpathname;
+    { char *rl; for (rl = fullpathname; *rl != 0; rl++) if (*rl == '/') rleaf = rl + 1; }
     /* does the directory exist? */
     if (changedir(directory) != 0) {
       DBG("open/create/spop failed because directory does not exist\n");
@@ -857,7 +866,7 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
         if (readonly_mode) {
           fileres = -1; /* simulate failure */
         } else {
-          fileres = createfile(&fprops, directory, fname, stackattr & 0xff,
+          fileres = createfile(&fprops, directory, rleaf, stackattr & 0xff,
                                drivesfat[reqdrv]);
         }
         resopenmode = 2; /* read/write */
@@ -882,7 +891,7 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
           DBG("file doesn't exist -> ");
           if ((actioncode & 0xf0) == 16) { /* create */
             DBG("create file\n");
-            fileres = createfile(&fprops, directory, fname, stackattr & 0xff,
+            fileres = createfile(&fprops, directory, rleaf, stackattr & 0xff,
                                  drivesfat[reqdrv]);
             if (fileres == 0)
               spopres = 2; /* spopres == 2 means 'file created' */
@@ -906,7 +915,7 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
             if (readonly_mode) {
               fileres = 1;
             } else {
-              fileres = createfile(&fprops, directory, fname, stackattr & 0xff,
+              fileres = createfile(&fprops, directory, rleaf, stackattr & 0xff,
                                    drivesfat[reqdrv]);
               if (fileres == 0)
                 spopres = 3; /* spopres == 3 means 'file truncated' */
@@ -1038,7 +1047,8 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
   } else if ((query == AL_LFN_MKDIR) && (reqbufflen >= 3)) { /* 0x49 */
     /* req: LFNSTR full dir path. Creates the directory under its REAL long
      * name (a classic 39h pass-down would 8.3-mangle it). resp: AX only. */
-    char dlfn[260], dirpart[512], leaf[260], resolved[512], full[900];
+    char dlfn[260], dirpart[512], leaf[260], resolved[512], full[1300];
+    char leafd[768]; /* leaf wire(OEM)->disk(UTF-8) */
     struct stat st;
     if (readonly_mode) {
       *ax = 5;
@@ -1047,11 +1057,12 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
     } else {
       explodepath(dirpart, leaf, dlfn, (int)strlen(dlfn));
       resolve_path(resolved, root, dirpart);
+      cp_wire2disk(leaf, leafd, sizeof(leafd));
       DBG("LFN_MKDIR '%s' in '%s'\n", leaf, resolved);
       if ((leaf[0] == 0) || (stat(resolved, &st) != 0) || (!S_ISDIR(st.st_mode))) {
         *ax = 3; /* parent path not found */
       } else {
-        snprintf(full, sizeof(full), "%s/%s", resolved, leaf);
+        snprintf(full, sizeof(full), "%s/%s", resolved, leafd);
         if (stat(full, &st) == 0) {
           *ax = 5; /* already exists */
         } else if (mkdir(full, 0777) != 0) {
@@ -1064,7 +1075,8 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
      * the REAL long target name (a classic 56h pass-down would 8.3-mangle the
      * target). Same-drive only by construction. resp: AX only. */
     char oldw[260], neww[260], oldfull[512];
-    char dirpart[512], leaf[260], resolved[512], newfull[900];
+    char dirpart[512], leaf[260], resolved[512], newfull[1300];
+    char leafd[768]; /* target leaf wire(OEM)->disk(UTF-8) */
     struct stat st;
     unsigned short o1len;
     o1len = (unsigned short)(reqbuff[0] | (reqbuff[1] << 8));
@@ -1079,11 +1091,12 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
       resolve_path(oldfull, root, oldw);
       explodepath(dirpart, leaf, neww, (int)strlen(neww));
       resolve_path(resolved, root, dirpart);
+      cp_wire2disk(leaf, leafd, sizeof(leafd));
       DBG("LFN_RENAME '%s' -> '%s'/'%s'\n", oldfull, resolved, leaf);
       if ((stat(oldfull, &st) != 0) || (leaf[0] == 0)) {
         *ax = 2; /* source not found */
       } else {
-        snprintf(newfull, sizeof(newfull), "%s/%s", resolved, leaf);
+        snprintf(newfull, sizeof(newfull), "%s/%s", resolved, leafd);
         if (stat(newfull, &st) == 0) {
           *ax = 5; /* target exists: DOS rename must fail, not overwrite */
         } else if (rename(oldfull, newfull) != 0) {
@@ -1175,7 +1188,8 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
       *ax = 5;
     } else {
       unsigned char cattr = reqbuff[0]; /* creation attributes (low byte) */
-      char dlfn[260], dirpart[512], leaf[260], resolved[512], fullpath[1024];
+      char dlfn[260], dirpart[512], leaf[260], resolved[512], fullpath[1300];
+      char leafd[768]; /* leaf converted wire(OEM)->disk(UTF-8), may 3x-expand */
       struct fileprops fprops;
       if (lfnstr_get(reqbuff + 2, reqbufflen - 2, dlfn, sizeof(dlfn)) != 0) {
         *ax = 2;
@@ -1184,23 +1198,25 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
       } else {
         explodepath(dirpart, leaf, dlfn, (int)strlen(dlfn));
         resolve_path(resolved, root, dirpart);
+        cp_wire2disk(leaf, leafd, sizeof(leafd)); /* OEM leaf -> UTF-8 on disk */
         DBG("LFN_CREATE '%s' in '%s'\n", leaf, resolved);
         if (changedir(resolved) != 0) {
           *ax = 3; /* path not found */
-        } else if (createfile(&fprops, resolved, leaf, cattr,
+        } else if (createfile(&fprops, resolved, leafd, cattr,
                               drivesfat[reqdrv]) != 0) {
           *ax = 2;
         } else {
           unsigned short fileid;
-          const char *realleaf;
-          snprintf(fullpath, sizeof(fullpath), "%s/%s", resolved, leaf);
-          realleaf = lfn_alias_from_path(&fprops, fullpath);
+          snprintf(fullpath, sizeof(fullpath), "%s/%s", resolved, leafd);
+          /* fills fprops->fcbname with the (OEM) 8.3 alias; its UTF-8 return
+           * is ignored -- the wire long name is the OEM leaf the client sent */
+          (void)lfn_alias_from_path(&fprops, fullpath);
           fileid = getitemss(fullpath);
           if (fileid == 0xffffu) {
             *ax = 2;
           } else {
             reslen = lfn_fill_resp(answ, &fprops, fileid, 2 /*created*/,
-                                   2 /*rw*/, realleaf);
+                                   2 /*rw*/, leaf);
           }
         }
       }
@@ -1220,11 +1236,13 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
       } else {
         unsigned short fileid = getitemss(resolved);
         const char *realleaf = lfn_alias_from_path(&fprops, resolved);
+        char wleaf[256];
+        cp_disk2wire(realleaf, wleaf, sizeof(wleaf)); /* OEM long name for wire */
         if (fileid == 0xffffu) {
           *ax = 2;
         } else {
           reslen = lfn_fill_resp(answ, &fprops, fileid, 1 /*opened*/, 2 /*rw*/,
-                                 realleaf);
+                                 wleaf);
         }
       }
     }
@@ -1537,6 +1555,10 @@ int main(int argc, char **argv) {
               root[i + 2]);
     }
   }
+
+  /* select the OEM codepage used for wire<->disk filename conversion; the
+   * default (CP437) matches an unconfigured US DOS box (increment 6) */
+  cp_init(getenv("ETHERDFS_CODEPAGE"));
 
   handle = raw_sock(0xEDF5, intname, mymac);
   if (handle == NULL) {

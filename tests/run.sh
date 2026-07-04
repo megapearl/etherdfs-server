@@ -37,9 +37,16 @@ printf W>"my long file.txt"
 mkdir -p "Long Dir Name"
 printf N>"Long Dir Name/nested long file.txt"
 mkdir -p emptydir   # empty first-level subdir (isroot . / .. regression)
+printf Q > "$(printf 'caf\303\251.txt')"   # UTF-8 'café.txt' (increment 6 codepage)
 
 echo; echo "########## WIRE / process() TEST (ethersrv.c) ##########"
 /tmp/test_proto "$FIX"
+# increment 6: the CP437 create ("ni\xA4o6.txt") must exist on disk as UTF-8 nino
+if [ -f "$FIX/$(printf 'ni\303\261o6.txt')" ]; then
+  echo "  OK: CP437 create stored as UTF-8 on disk (ni\xc3\xb1o6.txt)"
+else
+  echo "  FAIL: CP437 create did not produce the UTF-8 disk name"; exit 1
+fi
 
 cd "$(dirname "$0")/.."  # back to repo root
 

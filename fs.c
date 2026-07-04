@@ -23,6 +23,129 @@
 #include "debug.h"
 #include "fs.h" /* include self for control */
 
+/* ===================================================================
+ * Codepage conversion (increment 6): the Linux filesystem stores names as
+ * UTF-8, but the DOS wire carries single-byte OEM codepage bytes (CP437 by
+ * default, CP850 optional via ETHERDFS_CODEPAGE). We convert at the two
+ * storage seams: disk->wire when listing/matching (cp_disk2wire) and
+ * wire->disk when creating (cp_wire2disk). 0x00..0x7F is ASCII == Unicode
+ * 1:1; only the high half needs a table. Tables are generated from the
+ * authoritative unicode.org MICSFT/PC/CP{437,850}.TXT. */
+static const unsigned short cp437_hi[128] = {
+  0x00C7, 0x00FC, 0x00E9, 0x00E2, 0x00E4, 0x00E0, 0x00E5, 0x00E7,
+  0x00EA, 0x00EB, 0x00E8, 0x00EF, 0x00EE, 0x00EC, 0x00C4, 0x00C5,
+  0x00C9, 0x00E6, 0x00C6, 0x00F4, 0x00F6, 0x00F2, 0x00FB, 0x00F9,
+  0x00FF, 0x00D6, 0x00DC, 0x00A2, 0x00A3, 0x00A5, 0x20A7, 0x0192,
+  0x00E1, 0x00ED, 0x00F3, 0x00FA, 0x00F1, 0x00D1, 0x00AA, 0x00BA,
+  0x00BF, 0x2310, 0x00AC, 0x00BD, 0x00BC, 0x00A1, 0x00AB, 0x00BB,
+  0x2591, 0x2592, 0x2593, 0x2502, 0x2524, 0x2561, 0x2562, 0x2556,
+  0x2555, 0x2563, 0x2551, 0x2557, 0x255D, 0x255C, 0x255B, 0x2510,
+  0x2514, 0x2534, 0x252C, 0x251C, 0x2500, 0x253C, 0x255E, 0x255F,
+  0x255A, 0x2554, 0x2569, 0x2566, 0x2560, 0x2550, 0x256C, 0x2567,
+  0x2568, 0x2564, 0x2565, 0x2559, 0x2558, 0x2552, 0x2553, 0x256B,
+  0x256A, 0x2518, 0x250C, 0x2588, 0x2584, 0x258C, 0x2590, 0x2580,
+  0x03B1, 0x00DF, 0x0393, 0x03C0, 0x03A3, 0x03C3, 0x00B5, 0x03C4,
+  0x03A6, 0x0398, 0x03A9, 0x03B4, 0x221E, 0x03C6, 0x03B5, 0x2229,
+  0x2261, 0x00B1, 0x2265, 0x2264, 0x2320, 0x2321, 0x00F7, 0x2248,
+  0x00B0, 0x2219, 0x00B7, 0x221A, 0x207F, 0x00B2, 0x25A0, 0x00A0,
+};
+static const unsigned short cp850_hi[128] = {
+  0x00C7, 0x00FC, 0x00E9, 0x00E2, 0x00E4, 0x00E0, 0x00E5, 0x00E7,
+  0x00EA, 0x00EB, 0x00E8, 0x00EF, 0x00EE, 0x00EC, 0x00C4, 0x00C5,
+  0x00C9, 0x00E6, 0x00C6, 0x00F4, 0x00F6, 0x00F2, 0x00FB, 0x00F9,
+  0x00FF, 0x00D6, 0x00DC, 0x00F8, 0x00A3, 0x00D8, 0x00D7, 0x0192,
+  0x00E1, 0x00ED, 0x00F3, 0x00FA, 0x00F1, 0x00D1, 0x00AA, 0x00BA,
+  0x00BF, 0x00AE, 0x00AC, 0x00BD, 0x00BC, 0x00A1, 0x00AB, 0x00BB,
+  0x2591, 0x2592, 0x2593, 0x2502, 0x2524, 0x00C1, 0x00C2, 0x00C0,
+  0x00A9, 0x2563, 0x2551, 0x2557, 0x255D, 0x00A2, 0x00A5, 0x2510,
+  0x2514, 0x2534, 0x252C, 0x251C, 0x2500, 0x253C, 0x00E3, 0x00C3,
+  0x255A, 0x2554, 0x2569, 0x2566, 0x2560, 0x2550, 0x256C, 0x00A4,
+  0x00F0, 0x00D0, 0x00CA, 0x00CB, 0x00C8, 0x0131, 0x00CD, 0x00CE,
+  0x00CF, 0x2518, 0x250C, 0x2588, 0x2584, 0x00A6, 0x00CC, 0x2580,
+  0x00D3, 0x00DF, 0x00D4, 0x00D2, 0x00F5, 0x00D5, 0x00B5, 0x00FE,
+  0x00DE, 0x00DA, 0x00DB, 0x00D9, 0x00FD, 0x00DD, 0x00AF, 0x00B4,
+  0x00AD, 0x00B1, 0x2017, 0x00BE, 0x00B6, 0x00A7, 0x00F7, 0x00B8,
+  0x00B0, 0x00A8, 0x00B7, 0x00B9, 0x00B3, 0x00B2, 0x25A0, 0x00A0,
+};
+
+static const unsigned short *g_cp_hi = cp437_hi; /* active high-half table */
+
+/* Select the active codepage from a name/number ("437" default, "850"). NULL
+ * or unknown -> CP437. Called once at startup from main(). */
+void cp_init(const char *name) {
+  if (name != NULL &&
+      (strcmp(name, "850") == 0 || strcmp(name, "cp850") == 0 ||
+       strcmp(name, "CP850") == 0)) {
+    g_cp_hi = cp850_hi;
+  } else {
+    g_cp_hi = cp437_hi;
+  }
+}
+
+/* Convert a UTF-8 disk name to OEM-codepage wire bytes. Each Unicode code
+ * point becomes exactly one output byte: ASCII passes through, a high-half
+ * code point is reverse-looked-up in the active table, and anything not
+ * representable becomes '_' (Win95 substitutes '_' for unmappable chars). A
+ * malformed UTF-8 lead/continuation byte is passed through raw (best effort,
+ * never expands). Output is always shorter-or-equal to the input, so a 255-
+ * byte name fits any >=256 buffer. NUL-terminated, bounded by outsz. */
+void cp_disk2wire(const char *utf8, char *out, int outsz) {
+  const unsigned char *s = (const unsigned char *)utf8;
+  int o = 0;
+  while (*s != 0 && o < outsz - 1) {
+    unsigned long cp;
+    int n, k, ok;
+    unsigned char b = *s;
+    if (b < 0x80) { out[o++] = (char)b; s++; continue; }
+    if ((b & 0xE0) == 0xC0) { cp = b & 0x1F; n = 1; }
+    else if ((b & 0xF0) == 0xE0) { cp = b & 0x0F; n = 2; }
+    else if ((b & 0xF8) == 0xF0) { cp = b & 0x07; n = 3; }
+    else { out[o++] = '_'; s++; continue; } /* stray continuation/invalid lead */
+    ok = 1;
+    for (k = 0; k < n; k++) {
+      if ((s[1 + k] & 0xC0) != 0x80) { ok = 0; break; }
+      cp = (cp << 6) | (s[1 + k] & 0x3F);
+    }
+    if (!ok) { out[o++] = '_'; s++; continue; } /* truncated sequence */
+    s += n + 1;
+    if (cp < 0x80) { out[o++] = (char)cp; continue; }
+    { int i, hit = -1;
+      for (i = 0; i < 128; i++) if (g_cp_hi[i] == cp) { hit = i; break; }
+      out[o++] = (hit >= 0) ? (char)(0x80 + hit) : '_';
+    }
+  }
+  out[o] = 0;
+}
+
+/* Convert OEM-codepage wire bytes to a UTF-8 disk name. ASCII passes through;
+ * a high byte expands to the 1..3 byte UTF-8 encoding of its code point (all
+ * CP437/CP850 points are in the BMP, so <=3 bytes). Output can be up to 3x
+ * the input, so the caller must size the buffer accordingly. NUL-terminated,
+ * bounded by outsz (a code point that would not fit whole is dropped). */
+void cp_wire2disk(const char *cp, char *out, int outsz) {
+  const unsigned char *s = (const unsigned char *)cp;
+  int o = 0;
+  while (*s != 0) {
+    unsigned char b = *s++;
+    unsigned long u = (b < 0x80) ? b : g_cp_hi[b - 0x80];
+    if (u < 0x80) {
+      if (o + 1 >= outsz) break;
+      out[o++] = (char)u;
+    } else if (u < 0x800) {
+      if (o + 2 >= outsz) break;
+      out[o++] = (char)(0xC0 | (u >> 6));
+      out[o++] = (char)(0x80 | (u & 0x3F));
+    } else {
+      if (o + 3 >= outsz) break;
+      out[o++] = (char)(0xE0 | (u >> 12));
+      out[o++] = (char)(0x80 | ((u >> 6) & 0x3F));
+      out[o++] = (char)(0x80 | (u & 0x3F));
+    }
+  }
+  out[o] = 0;
+}
+/* =================================================================== */
+
 /* database containing file/dir identifiers and their names - this is used
  * whenever ethersrv-linux needs to provide etherdfs with a 16bit identifier
  * that etherdfs will subsequently use to refer to this file or dir (typically
@@ -406,7 +529,8 @@ int setitemattr(char *i, unsigned char fattr) {
 /* directory entry used for deterministic SFN (~N) assignment, shared between
  * gendirlist() and resolve_sfn_in_dir() */
 struct sfn_entry {
-  char lfn[256];
+  char lfn[256];   /* real on-disk name, UTF-8 (for out_real / the fs path) */
+  char cp437[256]; /* same name in the active OEM codepage (wire + alias in) */
   char sfn[14];
 };
 
@@ -534,6 +658,7 @@ static long gendirlist(struct sfsdb *root, unsigned char fatflag,
     for (ni = 0; ni < ncount; ni++) {
       int collision_idx = 0;
       char tempsfn[14];
+      char cp437[256];
 
       newnode = calloc(1, sizeof(struct sdirlist));
       if (newnode == NULL) {
@@ -542,10 +667,14 @@ static long gendirlist(struct sfsdb *root, unsigned char fatflag,
       }
       sprintf(fullpath + fullpathoffset, "%s", names[ni]);
 
+      /* wire/OEM form of the name -- the 8.3 alias and the long name we hand
+       * to DOS must be in the DOS codepage, not UTF-8 (increment 6) */
+      cp_disk2wire(names[ni], cp437, sizeof(cp437));
+
       /* Generate unique SFN */
       do {
         int collision_found = 0;
-        lfn2sfn(tempsfn, names[ni], collision_idx);
+        lfn2sfn(tempsfn, cp437, collision_idx);
         for (checknode = root->dirlist; checknode != NULL;
              checknode = checknode->next) {
           if (strcmp(checknode->sfn_name, tempsfn) == 0) {
@@ -559,8 +688,8 @@ static long gendirlist(struct sfsdb *root, unsigned char fatflag,
       } while (collision_idx < 9999);
 
       strcpy(newnode->sfn_name, tempsfn);
-      /* keep the real long name too, for native LFN ops (8.3 path ignores it) */
-      snprintf(newnode->lfn_name, sizeof(newnode->lfn_name), "%s", names[ni]);
+      /* keep the long name too (wire/OEM form), for native LFN ops */
+      snprintf(newnode->lfn_name, sizeof(newnode->lfn_name), "%s", cp437);
 
       /* When getting attributes, use the generated SFN so FCB is based on SFN */
       getitemattr(fullpath, &(newnode->fprops), fatflag);
@@ -977,6 +1106,8 @@ int resolve_component(const char *dir_path, const char *wire_name,
     }
 
     strcpy(local_sfns[count].lfn, diridx->d_name);
+    cp_disk2wire(diridx->d_name, local_sfns[count].cp437,
+                 sizeof(local_sfns[count].cp437));
     count++;
   }
   closedir(dp);
@@ -991,7 +1122,7 @@ int resolve_component(const char *dir_path, const char *wire_name,
   for (i = 0; i < count; i++) {
     collision_idx = 0;
     do {
-      lfn2sfn(tempsfn, local_sfns[i].lfn, collision_idx);
+      lfn2sfn(tempsfn, local_sfns[i].cp437, collision_idx);
       collision_found = 0;
       for (j = 0; j < i; j++) {
         if (strcmp(local_sfns[j].sfn, tempsfn) == 0) {
@@ -1010,7 +1141,7 @@ int resolve_component(const char *dir_path, const char *wire_name,
    * lets "\Long Dir Name\..." wire components reach the right inode even
    * when the case differs from disk). */
   for (i = 0; i < count; i++) {
-    if (strcasecmp(local_sfns[i].lfn, wire_name) == 0) {
+    if (strcasecmp(local_sfns[i].cp437, wire_name) == 0) {
       match = i;
       break;
     }
@@ -1039,19 +1170,19 @@ static void resolve_sfn_in_dir(char *actual_name, const char *dir_path,
   if (resolve_component(dir_path, target_sfn, actual_name, NULL) == 0)
     return;
 
-  /* Not found, just return what was asked (useful for AL_CREATE) */
+  /* Not found -> return the requested name as the on-disk name (AL_CREATE will
+   * create it). The wire carries OEM-codepage bytes, so convert to UTF-8 for
+   * the Linux filesystem (increment 6); the result can be up to 3x longer, so
+   * actual_name must be >= 768 bytes (resolve_path sizes it so). */
+  cp_wire2disk(target_sfn, actual_name, 768);
   if (lowercase_mode) {
     int char_idx = 0;
-    while (target_sfn[char_idx]) {
-      char c = target_sfn[char_idx];
+    while (actual_name[char_idx]) {
+      char c = actual_name[char_idx];
       if (c >= 'A' && c <= 'Z')
-        c += ('a' - 'A');
-      actual_name[char_idx] = c;
+        actual_name[char_idx] = (char)(c + ('a' - 'A'));
       char_idx++;
     }
-    actual_name[char_idx] = 0;
-  } else {
-    strcpy(actual_name, target_sfn);
   }
 }
 
@@ -1063,7 +1194,7 @@ void resolve_path(char *resolved_path, const char *root, const char *dos_path) {
   char *token;
   char dos_copy[1024];
   char *p;
-  char actual_name[256];
+  char actual_name[768]; /* wire->disk (cp_wire2disk) can 3x-expand a create leaf */
 
   snprintf(current_dir, sizeof(current_dir), "%s", root);
   snprintf(dos_copy, sizeof(dos_copy), "%s", dos_path);
@@ -1181,15 +1312,25 @@ int path_to_lfn(char *out, const char *root, const char *dos_path) {
     return (0);
   }
   while (token != NULL) {
-    if ((strcmp(token, ".") == 0) || (strcmp(token, "..") == 0) ||
-        (resolve_component(current_dir, token, real, NULL) != 0)) {
-      snprintf(real, sizeof(real), "%s", token); /* verbatim fallback */
+    char wire[256];
+    int found = 0;
+    if ((strcmp(token, ".") != 0) && (strcmp(token, "..") != 0) &&
+        (resolve_component(current_dir, token, real, NULL) == 0))
+      found = 1;
+    if (found) {
+      /* `out` (headed for the DOS client) gets the OEM/wire form of the real
+       * long name; current_dir keeps the UTF-8 on-disk name for the next
+       * lookup (increment 6) */
+      cp_disk2wire(real, wire, sizeof(wire));
+    } else {
+      snprintf(real, sizeof(real), "%s", token); /* verbatim (already OEM) */
+      snprintf(wire, sizeof(wire), "%s", token);
     }
-    if (outlen + (int)strlen(real) + 2 >= 261)
+    if (outlen + (int)strlen(wire) + 2 >= 261)
       break;
     out[outlen++] = '\\';
-    for (i = 0; real[i] != 0; i++)
-      out[outlen++] = real[i];
+    for (i = 0; wire[i] != 0; i++)
+      out[outlen++] = wire[i];
     out[outlen] = 0;
     if (strlen(current_dir) + strlen(real) + 2 < sizeof(current_dir)) {
       strcat(current_dir, "/");
@@ -1215,8 +1356,15 @@ void sfn_for_name_in_dir(const char *dir_path, const char *target_lfn,
   char tempsfn[14];
   int collision_idx, collision_found;
 
-  /* default fallback (also covers the malloc/opendir failure paths) */
-  lfn2sfn(out_sfn, target_lfn, 0);
+  /* default fallback (also covers the malloc/opendir failure paths). The
+   * target comes from the on-disk (UTF-8) name; the 8.3 alias must be built
+   * from its OEM/wire form to stay in sync with gendirlist()/resolve_component()
+   * (increment 6). */
+  {
+    char t_cp[256];
+    cp_disk2wire(target_lfn, t_cp, sizeof(t_cp));
+    lfn2sfn(out_sfn, t_cp, 0);
+  }
 
   list = malloc(capacity * sizeof(struct sfn_entry));
   if (list == NULL)
@@ -1238,6 +1386,7 @@ void sfn_for_name_in_dir(const char *dir_path, const char *target_lfn,
       list = grown;
     }
     snprintf(list[count].lfn, sizeof(list[count].lfn), "%s", diridx->d_name);
+    cp_disk2wire(diridx->d_name, list[count].cp437, sizeof(list[count].cp437));
     count++;
   }
   closedir(dp);
@@ -1247,7 +1396,7 @@ void sfn_for_name_in_dir(const char *dir_path, const char *target_lfn,
   for (i = 0; i < count; i++) {
     collision_idx = 0;
     do {
-      lfn2sfn(tempsfn, list[i].lfn, collision_idx);
+      lfn2sfn(tempsfn, list[i].cp437, collision_idx);
       collision_found = 0;
       for (j = 0; j < i; j++) {
         if (strcmp(list[j].sfn, tempsfn) == 0) {
