@@ -211,9 +211,29 @@ script drives a containerized build (no host toolchain needed):
 sh client/build-linux.sh "$(git describe --tags)"
 ```
 
-Prebuilt binaries for both halves are committed under
-[`client/bin/`](client/bin/) (DOS `ETHERDFS.EXE`) and [`bin/`](bin/) (the
-Linux `ethersrv` daemon), built from the current release tag for convenience.
+### Prebuilt binaries
+
+Prebuilt binaries for both halves are committed for convenience, built from the
+current release tag:
+
+* **DOS client:** [`client/bin/ETHERDFS.EXE`](client/bin/ETHERDFS.EXE)
+* **Linux `ethersrv` daemon** ([`bin/`](bin/)) - statically linked (musl, no
+  runtime dependencies), one per architecture:
+
+| File | Architecture |
+| :--- | :--- |
+| [`bin/ethersrv-linux-x86_64`](bin/ethersrv-linux-x86_64) | 64-bit x86 (x86-64 / amd64) |
+| [`bin/ethersrv-linux-i686`](bin/ethersrv-linux-i686) | 32-bit x86 (i686 / i386) |
+| [`bin/ethersrv-linux-aarch64`](bin/ethersrv-linux-aarch64) | 64-bit ARM (aarch64 / arm64) |
+| [`bin/ethersrv-linux-armv7`](bin/ethersrv-linux-armv7) | 32-bit ARM (armv7 / armhf) |
+
+Being statically linked, each runs as-is on its architecture without libpcap or
+a matching libc installed:
+
+```bash
+chmod +x ethersrv-linux-x86_64
+sudo ./ethersrv-linux-x86_64 -f -v RETRO eth0 /srv/dos
+```
 
 ---
 
