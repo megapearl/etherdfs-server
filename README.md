@@ -1,50 +1,50 @@
-# EtherDFS Server for Docker — with native Long File Name support
+# EtherDFS Server for Docker - with native Long File Name support
 
 A lightweight, containerized **EtherDFS Server** (`ethersrv`) that lets a
 vintage MS-DOS PC mount a folder from a modern Linux/NAS host as a local drive
-letter over **raw Ethernet** — no TCP/IP stack required on the DOS side.
+letter over **raw Ethernet** - no TCP/IP stack required on the DOS side.
 
 This is a fork of [oerg866/ethersrv-866](https://github.com/oerg866/ethersrv-866)
 (itself a fork of the original [EtherDFS by Mateusz Viste](http://etherdfs.sourceforge.net/)),
 optimized for **TrueNAS SCALE / ZFS** and extended with a full **Win95-style
-Long File Name (LFN) implementation** — both the Linux daemon *and* a matching
+Long File Name (LFN) implementation** - both the Linux daemon *and* a matching
 DOS client TSR live in this repository.
 
 > **Highlights of this fork:** true long filenames on the DOS side (not just
 > 8.3 aliases), OEM codepage conversion for accented names, deterministic
 > `~1` short-name generation on case-sensitive filesystems, unlimited
-> directory sizes, and a hardened wire protocol — all validated on real
+> directory sizes, and a hardened wire protocol - all validated on real
 > hardware (PC DOS 7.10 + 4DOS + Norton/Volkov Commander).
 
 ---
 
 ## 🌟 Key features
 
-* **Native Long File Name (LFN) support** *(this fork)* — with the bundled DOS
+* **Native Long File Name (LFN) support** *(this fork)* - with the bundled DOS
   client (`client/`), DOS gets the full Win95 LFN API on the mapped drive:
   `DIR` shows real long names, and open/copy/`REN`/`DEL`/`MD`/`RD`/`CD`/`ATTRIB`
   and truename all accept long names *and* long intermediate directory
   components. Served by the client TSR hooking `INT 21h/71xx`, backed by
-  additive server wire-opcodes (`0x40`–`0x4E`) that an older server safely
+  additive server wire-opcodes (`0x40`-`0x4E`) that an older server safely
   ignores.
-* **DOSLFN coexistence** — load DOSLFN first and EtherDFS second, and they
+* **DOSLFN coexistence** - load DOSLFN first and EtherDFS second, and they
   cooperate cleanly: DOSLFN keeps serving local FAT drives while EtherDFS
   serves its own network drives (it chains other drives down to DOSLFN).
-* **OEM codepage conversion** — names are stored UTF-8 on the host but travel
+* **OEM codepage conversion** - names are stored UTF-8 on the host but travel
   the wire in the DOS OEM codepage (**CP437** default, **CP850** via
   `ETHERDFS_CODEPAGE`), so accented names such as `Café Menü.txt` display and
   round-trip correctly. Unmappable characters degrade to `_`; 8.3 aliases are
   kept pure 7-bit so they survive DOS's own filename normalization.
-* **TrueNAS/ZFS 8.3 SFN compatibility** — a deterministic algorithm generates
+* **TrueNAS/ZFS 8.3 SFN compatibility** - a deterministic algorithm generates
   DOS-compatible 8.3 short names (`NAME~1.TXT`) on the fly for long/spaced/
   lowercase names on case-sensitive filesystems, so classic DOS tools never
   crash or fail to open them.
-* **Huge directory support** — no fixed 1024-file limit; the server allocates
+* **Huge directory support** - no fixed 1024-file limit; the server allocates
   dynamically to serve gigantic collections (e.g. eXoDOS, 3500+ items/dir).
-* **Adjustable output delay** (`ETHERDFS_DELAY`) — throttle transmission for
+* **Adjustable output delay** (`ETHERDFS_DELAY`) - throttle transmission for
   vintage 8086/XT ISA NICs (NE2000/RTL8019) that overflow at Gigabit speeds.
 * **Dynamic volume labels** (`VOLUME_LABEL`).
-* **Standalone Docker support** — an `entrypoint.sh` that waits for the
+* **Standalone Docker support** - an `entrypoint.sh` that waits for the
   physical interface to appear, preventing container crash-loops.
 
 ## 📖 What is EtherDFS?
@@ -63,15 +63,15 @@ graph TD
 
 ---
 
-## 🔤 Long File Names — how it works
+## 🔤 Long File Names - how it works
 
 Classic EtherDFS is an 8.3-only redirector. This fork adds LFN in two halves
 that ship together:
 
 | Half | Where | What it does |
 | :--- | :--- | :--- |
-| **Server** | `ethersrv.c` / `fs.c` | Answers additive LFN wire-opcodes `0x40`–`0x4E` (FindFirst/Next, Open, Create, Rename, Mkdir, TrueName, VolInfo), generates deterministic `~1` aliases, and converts names between UTF-8 (disk) and the OEM codepage (wire). |
-| **Client** | `client/` (`ETHERDFS.EXE`) | A resident TSR that hooks `INT 21h` and serves the Win95 LFN API (`71xx`) for its own drives — `714E/714F` FindFirst/Next, `716C` open/create, `7160` truename, `7156/7141/7139/713A/713B/7143/7147` ren/del/md/rd/cd/attrib/getcwd — translating them to the server opcodes or passing them down as 8.3 aliases. |
+| **Server** | `ethersrv.c` / `fs.c` | Answers additive LFN wire-opcodes `0x40`-`0x4E` (FindFirst/Next, Open, Create, Rename, Mkdir, TrueName, VolInfo), generates deterministic `~1` aliases, and converts names between UTF-8 (disk) and the OEM codepage (wire). |
+| **Client** | `client/` (`ETHERDFS.EXE`) | A resident TSR that hooks `INT 21h` and serves the Win95 LFN API (`71xx`) for its own drives - `714E/714F` FindFirst/Next, `716C` open/create, `7160` truename, `7156/7141/7139/713A/713B/7143/7147` ren/del/md/rd/cd/attrib/getcwd - translating them to the server opcodes or passing them down as 8.3 aliases. |
 
 What works on the DOS side once both are loaded:
 
@@ -97,14 +97,14 @@ ETHERDFS.EXE :: C-E   REM network drive(s) get LFN from EtherDFS (load last)
 
 EtherDFS installs on top of the `INT 21h` chain and serves LFN for *its* drives
 only, chaining every other drive down to DOSLFN. (Loading EtherDFS last also
-lets it cleanly unload itself with `ETHERDFS.EXE /U`, provided no other TSR —
-a telnet server, a resident file manager — hooked `INT 2Fh`/`INT 21h` after it.)
+lets it cleanly unload itself with `ETHERDFS.EXE /U`, provided no other TSR -
+a telnet server, a resident file manager - hooked `INT 2Fh`/`INT 21h` after it.)
 
 ---
 
 ## ⚠️ Networking requirements
 
-EtherDFS is pure **Layer 2** — no IP, no subnet, no gateway.
+EtherDFS is pure **Layer 2** - no IP, no subnet, no gateway.
 
 1. **`network_mode: host`** in Docker. Bridge/NAT drops the raw frames; port
    mapping does not apply.
@@ -155,7 +155,7 @@ services:
 You need two things on the vintage PC:
 
 1. A **packet driver** for your NIC (`NE2000.COM`, `3C509.COM`, `E100BPKT.COM`, …).
-2. The **EtherDFS client** — a prebuilt `ETHERDFS.EXE` ships in
+2. The **EtherDFS client** - a prebuilt `ETHERDFS.EXE` ships in
    [`client/bin/`](client/bin/).
 
 ### AUTOEXEC.BAT example
@@ -173,7 +173,7 @@ C:\NET\ETHERDFS\ETHERDFS.EXE :: C-E
 ```
 
 `ETHERDFS.EXE /U` unloads the resident driver (only if it is still on top of
-the `INT 2Fh`/`INT 21h` chains — see *DOSLFN coexistence* above).
+the `INT 2Fh`/`INT 21h` chains - see *DOSLFN coexistence* above).
 
 ---
 
@@ -188,7 +188,7 @@ make                    # produces ./ethersrv; version is derived from git
 sudo ./ethersrv -f -v RETRO eth0 /srv/dos
 ```
 
-The version string is **not hardcoded** — `make` derives it from the git tags
+The version string is **not hardcoded** - `make` derives it from the git tags
 (`git describe --tags --always --dirty`). Override with `make VERSION=vX.Y.Z`
 when building outside a git checkout.
 
@@ -219,29 +219,29 @@ Linux `ethersrv` daemon), built from the current release tag for convenience.
 
 ## 🔧 Troubleshooting
 
-**"Error: failed to scan dir" / empty drive** — almost always host permissions.
+**"Error: failed to scan dir" / empty drive** - almost always host permissions.
 Ensure the dataset is readable by the container (which runs as root):
 ```bash
 chmod -R 755 /mnt/tank/retro
 ```
 
-**Client locks up during large transfers** — a vintage ISA NIC being
+**Client locks up during large transfers** - a vintage ISA NIC being
 out-run by a Gigabit host. Set `ETHERDFS_DELAY=5` (or higher).
 
-**Intermittent "File not found" / drive errors under load** — check that
+**Intermittent "File not found" / drive errors under load** - check that
 `ETHERDFS_DEBUG` is `0`. Verbose logging under heavy client traffic can stall
 the (single-threaded) server via log-driver backpressure.
 
-**Accented name shows as `_` or won't open** — set `ETHERDFS_CODEPAGE` to
+**Accented name shows as `_` or won't open** - set `ETHERDFS_CODEPAGE` to
 match your DOS box's active codepage (`437` or `850`).
 
 ---
 
 ## 📜 Credits & license
 
-* **Original author:** [Mateusz Viste](https://etherdfs.sourceforge.net/) — EtherDFS + `ethersrv-linux`
+* **Original author:** [Mateusz Viste](https://etherdfs.sourceforge.net/) - EtherDFS + `ethersrv-linux`
 * **Linux/FreeBSD fork:** [Michael Ortmann (oerg866)](https://github.com/oerg866/ethersrv-866/)
 * **Dockerization, ZFS/8.3 SFN, LFN + codepage fork:** [Donald Flissinger](https://github.com/megapearl/etherdfs-server/)
 
-Distributed under the **MIT License** — see [`LICENSE`](LICENSE). The 8.3-alias,
+Distributed under the **MIT License** - see [`LICENSE`](LICENSE). The 8.3-alias,
 LFN and codepage additions are contributed under the same terms.
