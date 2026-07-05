@@ -2,7 +2,7 @@
 
 A lightweight, containerized **EtherDFS Server** (`ethersrv`) that lets a
 vintage MS-DOS PC mount a folder from a modern Linux/NAS host as a local drive
-letter over **raw Ethernet** - no TCP/IP stack required on the DOS side.
+letter over **raw Ethernet**. No TCP/IP stack is required on the DOS side, just a packet driver for the network card.
 
 This is a fork of [oerg866/ethersrv-866](https://github.com/oerg866/ethersrv-866)
 (itself a fork of the original [EtherDFS by Mateusz Viste](http://etherdfs.sourceforge.net/)),
