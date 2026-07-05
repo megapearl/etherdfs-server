@@ -50,7 +50,8 @@ DOS client TSR live in this repository.
 ## 📖 What is EtherDFS?
 
 EtherDFS creates a **Layer-2 (raw Ethernet)** drive mapping for MS-DOS clients.
-An old PC (8086 → Pentium) mounts a host folder as a drive letter (e.g. `E:`)
+An old PC (from an 8086/8088 XT up to a Pentium) mounts a host folder as a
+drive letter (e.g. `E:`)
 using nothing but a packet driver and a ~14 KB TSR.
 
 ```mermaid
