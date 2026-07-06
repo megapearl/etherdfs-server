@@ -35,7 +35,7 @@
 #include <signal.h>
 #include <stdint.h> /* uint16_t, uint32_t */
 #include <stdio.h>
-#include <stdlib.h> /* realpath() */
+#include <stdlib.h> /* strtoul(), getenv() */
 #include <string.h> /* mempcy() */
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -45,6 +45,7 @@
 
 #include "debug.h"
 #include "fs.h"
+#include "fsplat.h" /* platform filesystem access (POSIX/Win9x/DOS) */
 #include "lock.h"
 #include "net.h" /* raw-Ethernet packet I/O (libpcap/WinPcap/packet-driver) */
 
@@ -1047,7 +1048,7 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
      * name (a classic 39h pass-down would 8.3-mangle it). resp: AX only. */
     char dlfn[260], dirpart[512], leaf[260], resolved[512], full[1300];
     char leafd[768]; /* leaf wire(OEM)->disk(UTF-8) */
-    struct stat st;
+    int pis_dir;
     if (readonly_mode) {
       *ax = 5;
     } else if (lfnstr_get(reqbuff, reqbufflen, dlfn, sizeof(dlfn)) != 0) {
@@ -1057,18 +1058,19 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
       resolve_path(resolved, root, dirpart);
       cp_wire2disk(leaf, leafd, sizeof(leafd));
       DBG("LFN_MKDIR '%s' in '%s'\n", leaf, resolved);
-      if ((leaf[0] == 0) || (stat(resolved, &st) != 0) || (!S_ISDIR(st.st_mode))) {
+      if ((leaf[0] == 0) ||
+          (plat_stat(resolved, &pis_dir, NULL, NULL) != 0) || (!pis_dir)) {
         *ax = 3; /* parent path not found */
       } else {
         char exist[256];
         snprintf(full, sizeof(full), "%s/%s", resolved, leafd);
-        if ((stat(full, &st) == 0) ||
+        if ((plat_stat(full, NULL, NULL, NULL) == 0) ||
             (resolve_component(resolved, leaf, exist, NULL) == 0)) {
           /* exists -- incl. a case-insensitive match (Win95: creating "foo"
            * next to "Foo" fails with error 5; a POSIX fs would happily make a
            * case-duplicate DOS cannot address) */
           *ax = 5;
-        } else if (mkdir(full, 0777) != 0) {
+        } else if (plat_mkdir(full) != 0) {
           *ax = (errno == ENOENT) ? 3 : 5;
         }
       }
@@ -1080,7 +1082,6 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
     char oldw[260], neww[260], oldfull[512];
     char dirpart[512], leaf[260], resolved[512], newfull[1300];
     char leafd[768]; /* target leaf wire(OEM)->disk(UTF-8) */
-    struct stat st;
     unsigned short o1len;
     o1len = (unsigned short)(reqbuff[0] | (reqbuff[1] << 8));
     if (readonly_mode) {
@@ -1096,26 +1097,26 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
       resolve_path(resolved, root, dirpart);
       cp_wire2disk(leaf, leafd, sizeof(leafd));
       DBG("LFN_RENAME '%s' -> '%s'/'%s'\n", oldfull, resolved, leaf);
-      if ((stat(oldfull, &st) != 0) || (leaf[0] == 0)) {
+      if ((plat_stat(oldfull, NULL, NULL, NULL) != 0) || (leaf[0] == 0)) {
         *ax = 2; /* source not found */
       } else {
         char exist[256], existfull[1300];
-        struct stat sold, snew;
         snprintf(newfull, sizeof(newfull), "%s/%s", resolved, leafd);
-        if (stat(newfull, &st) == 0) {
+        if (plat_stat(newfull, NULL, NULL, NULL) == 0) {
           *ax = 5; /* target exists: DOS rename must fail, not overwrite */
         } else if ((resolve_component(resolved, leaf, exist, NULL) == 0) &&
                    (snprintf(existfull, sizeof(existfull), "%s/%s", resolved,
                              exist) > 0) &&
-                   (stat(existfull, &snew) == 0) &&
-                   ((stat(oldfull, &sold) != 0) ||
-                    (sold.st_ino != snew.st_ino) ||
-                    (sold.st_dev != snew.st_dev))) {
+                   (plat_stat(existfull, NULL, NULL, NULL) == 0) &&
+                   (strcmp(existfull, oldfull) != 0)) {
           /* a DIFFERENT file already exists under a case-insensitive match of
-           * the target (Win95 error 5); a pure case-rename of the same inode
-           * ("foo.txt" -> "FOO.txt") stays allowed */
+           * the target (Win95 error 5); a pure case-rename of the SAME file
+           * ("foo.txt" -> "FOO.txt", where the match resolves back to the
+           * source's real on-disk path) stays allowed. Keyed on the real
+           * on-disk path rather than st_ino/st_dev, which FAT has no stable
+           * equivalent for on any target platform. */
           *ax = 5;
-        } else if (rename(oldfull, newfull) != 0) {
+        } else if (plat_rename(oldfull, newfull) != 0) {
           *ax = (errno == ENOENT) ? 3 : ((errno == EXDEV) ? 0x11 : 5);
         }
       }
@@ -1452,7 +1453,7 @@ int main(int argc, char **argv) {
     root[i] = NULL;
   for (i = 0; i < (argc - optind); i++) {
     char tmppath[PATH_MAX];
-    if (realpath(argv[i + optind], tmppath) == NULL) {
+    if (plat_fullpath(argv[i + optind], tmppath, sizeof(tmppath)) != 0) {
       fprintf(stderr, "ERROR: failed to resolve path '%s'\n", argv[i + optind]);
       return (1);
     }
