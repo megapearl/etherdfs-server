@@ -166,6 +166,17 @@ void __declspec(naked) far pktdrv_recv(void) {
 /* translates a drive letter (either upper- or lower-case) into a number (A=0,
  * B=1, C=2, etc) */
 #define DRIVETONUM(x) (((x) >= 'a') && ((x) <= 'z')?x-'a':x-'A')
+/* Target drive index for an LFN INT 21h path. Use the "X:" prefix if present,
+ * otherwise the path is relative to the CURRENT default drive, which DOS keeps
+ * at SDA offset 16h. Without this, when our drive is the current drive the
+ * shell/DOSLFN hands us a drive-less path (e.g. "\\DIR\\*") and every LFN
+ * handler declined it, so the caller silently fell back to the 8.3 legacy path
+ * (no long names, broken subdir navigation). We only adopt the current drive
+ * for ROOT-relative paths ("\\..."); a bare relative name would need the CWD we
+ * do not resolve here, so those stay 0xFF (not ours -> chain, DOS resolves). */
+#define LFN_PATHDRV(p) ( ((p)[0] != 0 && (p)[1] == ':') ? DRIVETONUM((p)[0]) \
+                       : (((p)[0] == '\\' || (p)[0] == '/') \
+                          ? ((unsigned char far *)glob_sdaptr)[0x16] : 0xff) )
 
 
 /* all the calls I support are in the range AL=0..2Eh - the list below serves
@@ -1230,6 +1241,50 @@ static void lfn_fill_finddata(unsigned char far *fd, unsigned char *r, unsigned 
  * the FindFirst/Next query (per glob_lfn_op), fills the caller's WIN32_FIND_DATA
  * on success, updates the slot cursor, and sets glob_intregs (handle+CF-clear,
  * or AX=0x12 no-more + CF). */
+/* Resolve the target drive for an LFN path, INCLUDING drive-less relative paths
+ * ("*.*", "file.ext") which are relative to the current directory of the current
+ * drive: adopt that drive only if its current dir is readable from its CDS
+ * (lfn_server_path needs it). Qualified/root-relative paths go through
+ * LFN_PATHDRV unchanged. Returns 0xFF when we must not claim (-> the call falls
+ * back to the classic path, which stays correct). */
+static unsigned char lfn_claimdrv(unsigned char far *p) {
+  unsigned char idx = LFN_PATHDRV(p);
+  if (idx == 0xff) {
+    unsigned char cd = ((unsigned char far *)glob_sdaptr)[0x16];
+    struct cdsstruct far *cds =
+        (struct cdsstruct far *)glob_sdaptr->drive_cdsptr;
+    unsigned char far *cp = cds->current_path;
+    if ((cp[0] != 0) && (cp[1] == ':') &&
+        ((unsigned char)DRIVETONUM(cp[0]) == cd))
+      idx = cd;
+  }
+  return idx;
+}
+
+/* Copy an INT 21h LFN path into dst as a DRIVE-relative server path
+ * ("\dir\file"): strip "X:", and for a relative (drive-less, non-rooted) path
+ * prepend the current directory of drive `drv` (from its CDS) so e.g. "*.*"
+ * resolves against the current dir, not the root. Returns the char count (no
+ * NUL). Falls back to root-relative if the CDS is stale / for another drive. */
+static unsigned short lfn_server_path(unsigned char *dst, unsigned char far *p,
+                                      unsigned char drv) {
+  unsigned short n = 0, i;
+  if ((p[0] != 0) && (p[1] == ':')) p = p + 2;
+  if ((p[0] != '\\') && (p[0] != '/')) {
+    struct cdsstruct far *cds =
+        (struct cdsstruct far *)glob_sdaptr->drive_cdsptr;
+    unsigned char far *cp = cds->current_path;
+    if ((cp[0] != 0) && (cp[1] == ':') &&
+        ((unsigned char)DRIVETONUM(cp[0]) == drv)) {
+      i = 2;
+      while ((cp[i] != 0) && (n < 250)) { dst[n] = cp[i]; n++; i++; }
+      if ((n == 0) || (dst[n - 1] != '\\')) { dst[n] = '\\'; n++; }
+    }
+  }
+  for (i = 0; (p[i] != 0) && (n < 255); i++) { dst[n] = p[i]; n++; }
+  return n;
+}
+
 static void lfn_do_find(void) {
   unsigned char *sb = glob_pktdrv_sndbuff + 60;
   unsigned char *ans;
@@ -1243,8 +1298,7 @@ static void lfn_do_find(void) {
                               * lfn_leaf2fcb finds the '.' exactly like the
                               * server does (it truncates only absurd >126-char
                               * search masks, which never occur in practice) */
-    if ((path[0] != 0) && (path[1] == ':')) path = path + 2; /* strip "X:" */
-    while ((path[n] != 0) && (n < 255)) { sb[3 + n] = path[n]; n++; }
+    n = lfn_server_path(sb + 3, path, glob_lfn_drv);
     sb[0] = glob_lfn_find[slot].attr;   /* allowable attr */
     sb[1] = (unsigned char)(n & 0xff);  /* LFNSTR u16 length LE */
     sb[2] = (unsigned char)((n >> 8) & 0xff);
@@ -1320,8 +1374,7 @@ static unsigned short lfn_send_truename(unsigned char subfn,
   unsigned char *sb = glob_pktdrv_sndbuff + 60;
   unsigned short n = 0, rc;
   unsigned char att;
-  if ((path[0] != 0) && (path[1] == ':')) path = path + 2; /* strip "X:" */
-  while ((path[n] != 0) && (n < 255)) { sb[3 + n] = path[n]; n++; }
+  n = lfn_server_path(sb + 3, path, glob_lfn_drv);
   if (n == 0) { sb[3] = '\\'; n = 1; } /* bare "X:" -> root, never send an
                           empty path (an old/short-guarded server drops it) */
   sb[0] = subfn;
@@ -1361,10 +1414,10 @@ static void lfn_do_open(void) {
   unsigned char far *path = MK_FP(glob_intregs.w.ds, glob_intregs.w.si);
   action = glob_intregs.w.dx & 0x0013; /* bit0 open, bit1 truncate, bit4 create */
   glob_lfn_openerr = 0;
-  /* copy the drive-stripped path into the request as LFNSTR (probe) */
-  if ((path[0] != 0) && (path[1] == ':')) path = path + 2;
-  n = 0;
-  while ((path[n] != 0) && (n < 255)) { sb[3 + n] = path[n]; n++; }
+  /* copy the drive-stripped path into the request as LFNSTR (probe), resolving
+   * a relative path against the current dir (so 7z etc. can open a long name
+   * while our drive is current) */
+  n = lfn_server_path(sb + 3, path, glob_lfn_drv);
   sb[0] = 0;                          /* open mode byte (server ignores it) */
   sb[1] = (unsigned char)(n & 0xff);  /* LFNSTR u16 length LE */
   sb[2] = (unsigned char)((n >> 8) & 0xff);
@@ -1396,8 +1449,7 @@ static void lfn_do_open(void) {
     unsigned char cattr = (unsigned char)(glob_intregs.w.cx & 0xff);
     unsigned short m = 0;
     path = MK_FP(glob_intregs.w.ds, glob_intregs.w.si);
-    if ((path[0] != 0) && (path[1] == ':')) path = path + 2;
-    while ((path[m] != 0) && (m < 255)) { sb[4 + m] = path[m]; m++; }
+    m = lfn_server_path(sb + 4, path, glob_lfn_drv);
     sb[0] = cattr;
     sb[1] = 0;                          /* reserved */
     sb[2] = (unsigned char)(m & 0xff);  /* LFNSTR u16 length LE */
@@ -1496,12 +1548,10 @@ static void lfn_do_misc(void) {
     unsigned char far *po = MK_FP(glob_intregs.w.ds, glob_intregs.w.dx);
     unsigned char far *pn = MK_FP(glob_intregs.w.es, glob_intregs.w.di);
     unsigned short l1 = 0, l2 = 0;
-    if ((po[0] != 0) && (po[1] == ':')) po = po + 2;
-    if ((pn[0] != 0) && (pn[1] == ':')) pn = pn + 2;
-    while ((po[l1] != 0) && (l1 < 255)) { sb[2 + l1] = po[l1]; l1++; }
+    l1 = lfn_server_path(sb + 2, po, glob_lfn_drv);
     sb[0] = (unsigned char)(l1 & 0xff);
     sb[1] = (unsigned char)((l1 >> 8) & 0xff);
-    while ((pn[l2] != 0) && (l2 < 255)) { sb[4 + l1 + l2] = pn[l2]; l2++; }
+    l2 = lfn_server_path(sb + 4 + l1, pn, glob_lfn_drv);
     sb[2 + l1] = (unsigned char)(l2 & 0xff);
     sb[3 + l1] = (unsigned char)((l2 >> 8) & 0xff);
     rc = sendquery(AL_LFN_RENAME, glob_lfn_drv,
@@ -1520,8 +1570,7 @@ static void lfn_do_misc(void) {
     /* 7139h: path DS:DX -> server 0x49 (created under the real long name) */
     unsigned char far *src = MK_FP(glob_intregs.w.ds, glob_intregs.w.dx);
     unsigned short l1 = 0;
-    if ((src[0] != 0) && (src[1] == ':')) src = src + 2;
-    while ((src[l1] != 0) && (l1 < 255)) { sb[2 + l1] = src[l1]; l1++; }
+    l1 = lfn_server_path(sb + 2, src, glob_lfn_drv);
     sb[0] = (unsigned char)(l1 & 0xff);
     sb[1] = (unsigned char)((l1 >> 8) & 0xff);
     rc = sendquery(AL_LFN_MKDIR, glob_lfn_drv, (unsigned short)(2 + l1),
@@ -1775,7 +1824,7 @@ void __interrupt __far inthandler21(union INTPACK r) {
     if (r.h.al == 0xA0) { /* 71A0h GET VOLUME INFO -- advertise LFN locally */
       unsigned char far *rp = MK_FP(r.w.ds, r.w.dx); /* ASCIZ "X:\" */
       unsigned char idx = 0xff;
-      if ((rp[0] != 0) && (rp[1] == ':')) idx = DRIVETONUM(rp[0]);
+      idx = LFN_PATHDRV(rp);
       if ((idx <= 25) && (glob_data.ldrv[idx] != 0xff)) {
         if (r.w.cx >= 4) { /* ES:DI file-system name "EDF5" */
           unsigned char far *fsn = MK_FP(r.w.es, r.w.di);
@@ -1791,7 +1840,7 @@ void __interrupt __far inthandler21(union INTPACK r) {
     } else if (r.h.al == 0x4E) { /* 714Eh FindFirstFile */
       unsigned char far *pp = MK_FP(r.w.ds, r.w.dx); /* ASCIZ search path */
       unsigned char idx = 0xff, s;
-      if ((pp[0] != 0) && (pp[1] == ':')) idx = DRIVETONUM(pp[0]);
+      idx = lfn_claimdrv(pp);
       if ((idx <= 25) && (glob_data.ldrv[idx] != 0xff)) { /* our drive */
         if (lfn_nested) { r.w.ax = 0x0005; r.w.flags |= INTR_CF; return; }
         for (s = 0; s < LFN_FINDMAX; s++) if (glob_lfn_find[s].inuse == 0) break;
@@ -1834,7 +1883,7 @@ void __interrupt __far inthandler21(union INTPACK r) {
        * BX bit 10, which nothing we know sets. */
       unsigned char far *pp = MK_FP(r.w.ds, r.w.si);
       unsigned char idx = 0xff;
-      if ((pp[0] != 0) && (pp[1] == ':')) idx = DRIVETONUM(pp[0]);
+      idx = lfn_claimdrv(pp);
       if ((idx <= 25) && (glob_data.ldrv[idx] != 0xff)) { /* our drive */
         if (lfn_nested) { r.w.ax = 0x0005; r.w.flags |= INTR_CF; return; }
         glob_lfn_drv = idx;
@@ -1844,7 +1893,7 @@ void __interrupt __far inthandler21(union INTPACK r) {
     } else if (r.h.al == 0x60) { /* 7160h TRUENAME (CL=0/1/2) */
       unsigned char far *pp = MK_FP(r.w.ds, r.w.si);
       unsigned char idx = 0xff;
-      if ((pp[0] != 0) && (pp[1] == ':')) idx = DRIVETONUM(pp[0]);
+      idx = lfn_claimdrv(pp);
       if ((idx <= 25) && (glob_data.ldrv[idx] != 0xff)) {
         if (r.h.cl == 0) {
           /* canonicalize WITHOUT shortening (RBIL rb-3206): callers (4DOS
@@ -1874,7 +1923,7 @@ void __interrupt __far inthandler21(union INTPACK r) {
       unsigned char far *pp = MK_FP(r.w.ds, r.w.dx);
       unsigned char idx = 0xff, wild = 0;
       unsigned short k2;
-      if ((pp[0] != 0) && (pp[1] == ':')) idx = DRIVETONUM(pp[0]);
+      idx = lfn_claimdrv(pp);
       if ((idx <= 25) && (glob_data.ldrv[idx] != 0xff)) {
         for (k2 = 0; (pp[k2] != 0) && (k2 < 260); k2++)
           if ((pp[k2] == '*') || (pp[k2] == '?')) wild = 1;
@@ -1894,7 +1943,7 @@ void __interrupt __far inthandler21(union INTPACK r) {
     } else if ((r.h.al == 0x3A) || (r.h.al == 0x3B)) { /* 713Ah rd / 713Bh cd */
       unsigned char far *pp = MK_FP(r.w.ds, r.w.dx);
       unsigned char idx = 0xff;
-      if ((pp[0] != 0) && (pp[1] == ':')) idx = DRIVETONUM(pp[0]);
+      idx = lfn_claimdrv(pp);
       if ((idx <= 25) && (glob_data.ldrv[idx] != 0xff)) {
         if (lfn_nested) { r.w.ax = 0x0005; r.w.flags |= INTR_CF; return; }
         glob_lfn_drv = idx;
@@ -1907,7 +1956,7 @@ void __interrupt __far inthandler21(union INTPACK r) {
     } else if (r.h.al == 0x39) { /* 7139h mkdir: MUST keep the long name */
       unsigned char far *pp = MK_FP(r.w.ds, r.w.dx);
       unsigned char idx = 0xff;
-      if ((pp[0] != 0) && (pp[1] == ':')) idx = DRIVETONUM(pp[0]);
+      idx = lfn_claimdrv(pp);
       if ((idx <= 25) && (glob_data.ldrv[idx] != 0xff)) {
         unsigned short k2;
         if (lfn_nested) { r.w.ax = 0x0005; r.w.flags |= INTR_CF; return; }
@@ -1926,7 +1975,7 @@ void __interrupt __far inthandler21(union INTPACK r) {
       if (r.h.bl <= 1) { /* BL=0 get (out CX) / BL=1 set (in CX) */
         unsigned char far *pp = MK_FP(r.w.ds, r.w.dx);
         unsigned char idx = 0xff;
-        if ((pp[0] != 0) && (pp[1] == ':')) idx = DRIVETONUM(pp[0]);
+        idx = lfn_claimdrv(pp);
         if ((idx <= 25) && (glob_data.ldrv[idx] != 0xff)) {
           if (lfn_nested) { r.w.ax = 0x0005; r.w.flags |= INTR_CF; return; }
           glob_lfn_drv = idx;
@@ -1941,9 +1990,9 @@ void __interrupt __far inthandler21(union INTPACK r) {
       unsigned char far *po = MK_FP(r.w.ds, r.w.dx);
       unsigned char far *pn = MK_FP(r.w.es, r.w.di);
       unsigned char idx = 0xff, idx2 = 0xff;
-      if ((po[0] != 0) && (po[1] == ':')) idx = DRIVETONUM(po[0]);
+      idx = lfn_claimdrv(po);
       if ((idx <= 25) && (glob_data.ldrv[idx] != 0xff)) {
-        if ((pn[0] != 0) && (pn[1] == ':')) idx2 = DRIVETONUM(pn[0]);
+        idx2 = lfn_claimdrv(pn);
         if (idx2 != idx) { /* RBIL: not across disks */
           r.w.ax = 0x11;
           r.w.flags |= INTR_CF;

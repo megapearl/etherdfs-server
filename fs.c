@@ -243,11 +243,27 @@ void lfn2sfn(char *sfn, const char *lfn, int collision_idx) {
   int i, j = 0, ext_idx = -1;
   char basen[9] = {0};
   char extn[4] = {0};
+  int lossy = 0; /* set when producing the 8.3 form drops or truncates ANY
+                    character (spaces, embedded dots, invalid/high bytes, a
+                    basis >8 or extension >3, leading dots). The Win95/DOSLFN
+                    rule gives such a name a numeric "~N" tail so it stays
+                    distinct AND matches the alias apps synthesize themselves
+                    (DJGPP's 7-Zip, DOSLFN on local drives). A name that already
+                    fits 8.3 unchanged keeps its plain form (no tail). Without
+                    this, multi-dot names like "a.b.c.gz" collapsed to a
+                    tail-less alias that our own resolve path and 7-Zip
+                    disagreed on -> "file not found". */
 
   /* explicitly preserve '.' and '..' */
   if (strcmp(lfn, ".") == 0 || strcmp(lfn, "..") == 0) {
     strcpy(sfn, lfn);
     return;
+  }
+
+  /* leading dots carry no basis (".cvsignore" -> basis "cvsignore"): drop */
+  while (*lfn == '.') {
+    lfn++;
+    lossy = 1;
   }
 
   /* find the last dot for extension */
@@ -262,39 +278,51 @@ void lfn2sfn(char *sfn, const char *lfn, int collision_idx) {
    * path travels the classic INT 21h route (wire-observed on PC DOS 7.1:
    * e-acute 0x82 -> 'E' 0x45, u-diaeresis 0x81 -> 0x9A), so an alias
    * containing them comes back as DIFFERENT bytes and no longer matches
-   * itself. A 7-bit alias survives any DOS normalization. */
-  for (i = 0; lfn[i] != 0 && i != ext_idx && j < 8; i++) {
+   * itself. A 7-bit alias survives any DOS normalization. Every drop or
+   * over-8 truncation marks the name lossy (-> numeric tail). */
+  for (i = 0; lfn[i] != 0 && i != ext_idx; i++) {
     char c = lfn[i];
     if (c == ' ' || c == '.' || c == '+' || c == ',' || c == ';' || c == '=' ||
-        c == '[' || c == ']' || ((unsigned char)c >= 0x80))
+        c == '[' || c == ']' || ((unsigned char)c >= 0x80)) {
+      lossy = 1;
       continue; /* DOS invalid chars + high bytes */
-    basen[j++] = upchar(c);
+    }
+    if (j < 8)
+      basen[j++] = upchar(c);
+    else
+      lossy = 1; /* basis longer than 8 -> truncated */
   }
 
   /* copy valid chars to extn (max 3) */
   if (ext_idx >= 0) {
     j = 0;
-    for (i = ext_idx + 1; lfn[i] != 0 && j < 3; i++) {
+    for (i = ext_idx + 1; lfn[i] != 0; i++) {
       char c = lfn[i];
       if (c == ' ' || c == '.' || c == '+' || c == ',' || c == ';' ||
-          c == '=' || c == '[' || c == ']' || ((unsigned char)c >= 0x80))
+          c == '=' || c == '[' || c == ']' || ((unsigned char)c >= 0x80)) {
+        lossy = 1;
         continue; /* DOS invalid chars + high bytes (see basen loop) */
-      extn[j++] = upchar(c);
+      }
+      if (j < 3)
+        extn[j++] = upchar(c);
+      else
+        lossy = 1; /* extension longer than 3 -> truncated */
     }
   }
 
-  /* handle ~1 collision if original was truncated or had invalid chars/spaces
-   */
-  /* simple heuristic: always ~n if lfn != sfn (this is simplified, we apply it
-   * when requested) */
-  if (collision_idx > 0) {
-    char suffix[6];
-    int suflen = snprintf(suffix, sizeof(suffix), "~%d", collision_idx);
-    int baselen = strlen(basen);
-    if (baselen + suflen > 8) {
-      baselen = 8 - suflen;
+  /* Numeric tail (Win95/DOSLFN): a lossy basis always gets "~N" starting at 1;
+   * an exact 8.3 name that merely clashes with an earlier entry gets "~N" too.
+   * collision_idx (0,1,2,...) is the caller's per-name retry counter. */
+  {
+    int n = lossy ? (collision_idx + 1) : collision_idx;
+    if (n > 0) {
+      char suffix[8];
+      int suflen = snprintf(suffix, sizeof(suffix), "~%d", n);
+      int baselen = strlen(basen);
+      if (baselen > 8 - suflen)
+        baselen = 8 - suflen;
+      snprintf(basen + baselen, sizeof(basen) - baselen, "%s", suffix);
     }
-    snprintf(basen + baselen, 9 - baselen, "%s", suffix);
   }
 
   /* format into 8.3 */
