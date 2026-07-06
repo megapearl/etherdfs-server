@@ -406,9 +406,25 @@ static unsigned long time2dos(time_t t) {
  * since 1601-01-01 00:00 UTC). The Unix epoch (1970-01-01) is 11644473600
  * seconds after the FILETIME epoch. Used by the LFN FindFirst/Next replies so
  * the DOS client can hand a WIN32_FIND_DATA back without any date math. */
+/* Local UTC offset in seconds at time t, computed portably. tm_gmtoff is a
+ * glibc/BSD extension absent on MinGW and DJGPP, so derive the offset from the
+ * difference between localtime() and gmtime() of the same instant. */
+static long utc_offset(time_t t) {
+  struct tm lt, gt;
+  long days, secs;
+  lt = *localtime(&t); /* copy: localtime/gmtime share one static buffer */
+  gt = *gmtime(&t);
+  secs = (lt.tm_hour - gt.tm_hour) * 3600L + (lt.tm_min - gt.tm_min) * 60L +
+         (lt.tm_sec - gt.tm_sec);
+  if (lt.tm_year != gt.tm_year)
+    days = (lt.tm_year > gt.tm_year) ? 1 : -1;
+  else
+    days = lt.tm_yday - gt.tm_yday;
+  return secs + days * 86400L;
+}
+
 static unsigned long long time2filetime(time_t t) {
-  struct tm *lt = localtime(&t);
-  long off = (lt != NULL) ? lt->tm_gmtoff : 0;
+  long off = utc_offset(t);
   unsigned long long ft;
   /* time2dos() encodes LOCAL wall-clock; to keep the dual-emit contract (the
    * client picks DOS-packed or FILETIME per SI and gets the SAME instant), add

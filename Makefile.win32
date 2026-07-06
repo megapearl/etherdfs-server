@@ -1,0 +1,46 @@
+#
+# ethersrv makefile for Windows 9x - cross-built with the MinGW-w64 i686
+# toolchain on a Linux host. Produces ethersrv.exe.
+#
+# The binary targets Windows 95/98/ME: single-threaded (winpthreads never
+# linked), ANSI (*A) Win32 calls only (the wide *W functions are stubs on 9x),
+# and i586 code generation (mingw-w64's default P6 instructions fault on
+# pre-Pentium-Pro CPUs). At RUNTIME it needs WinPcap 3.1 installed - the last
+# WinPcap that supports 9x. The Npcap/WinPcap SDK is only needed at build time
+# (its pcap.h is API-compatible); unpack it under thirdparty/npcap-sdk.
+#
+#   make -f Makefile.win32 VERSION=v1.1.1
+#
+# ---------------------------------------------------------------------------
+# TOOLCHAIN CAVEAT for a binary that actually BOOTS on Win9x:
+# Every Win32 call in ethersrv's own code is an ANSI *A entry point, all of
+# which exist on Win9x. HOWEVER the stock mingw-w64 C runtime startup imports
+# two wide symbols - GetModuleHandleW and GetEnvironmentVariableW - which are
+# non-functional stubs on Win9x, so a binary built with the stock Debian
+# mingw-w64 will not start there. This Makefile therefore serves as the
+# compile/link CI check (and runs fine under KernelEx / on NT). For a genuine
+# 9x-runnable executable, build with the fsb4000 "gcc-for-Windows98" toolchain
+# (a mingw fork with a Win9x-safe *A CRT and i486/i586 codegen); the sources
+# here need no change - only CC and the SDK/lib paths differ.
+# GetDiskFreeSpaceExA additionally needs Win95-OSR2+ (present on 98/ME).
+# ---------------------------------------------------------------------------
+#
+CC      = i686-w64-mingw32-gcc
+SDK     = thirdparty/npcap-sdk
+VERSION ?= unknown
+
+CFLAGS  = -O2 -std=gnu89 -Wall -Wno-long-long -march=i586 -mtune=i586 \
+          -DWINVER=0x0400 -D_WIN32_WINDOWS=0x0410 -DPVER=\"$(VERSION)\" \
+          -I$(SDK)/Include
+LDFLAGS = -mconsole
+# wpcap.lib is a COFF import library from the SDK; ws2_32 provides the socket
+# types pcap.h needs, iphlpapi provides GetAdaptersInfo() for MAC discovery.
+LIBS    = $(SDK)/Lib/wpcap.lib -lws2_32 -liphlpapi
+
+SRC = ethersrv.c fs.c lock.c net_win.c fsplat_win.c
+
+ethersrv.exe: $(SRC) fs.h fsplat.h net.h endian_compat.h lock.h debug.h
+	$(CC) $(SRC) -o $@ $(CFLAGS) $(LDFLAGS) $(LIBS)
+
+clean:
+	rm -f ethersrv.exe

@@ -28,8 +28,6 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-#include <arpa/inet.h> /* htons() */
-#include <endian.h>    /* le16toh(), le32toh() */
 #include <errno.h>
 #include <limits.h> /* PATH_MAX and such */
 #include <signal.h>
@@ -44,10 +42,18 @@
 #include <unistd.h> /* getopt(), optind */
 
 #include "debug.h"
+#include "endian_compat.h" /* htons()/le16toh()/htole16() without glibc headers */
 #include "fs.h"
 #include "fsplat.h" /* platform filesystem access (POSIX/Win9x/DOS) */
 #include "lock.h"
 #include "net.h" /* raw-Ethernet packet I/O (libpcap/WinPcap/packet-driver) */
+
+/* daemonize(), umask() and the POSIX job-control signals (SIGHUP/SIGQUIT) exist
+ * only on unix-likes. On Windows 9x and DOS the server always runs in the
+ * foreground, so those pieces are compiled out on those targets. */
+#if defined(_WIN32) || defined(__DJGPP__) || defined(MSDOS)
+#define ETHERSRV_FOREGROUND_ONLY 1
+#endif
 
 /* program version */
 #ifndef PVER
@@ -139,7 +145,9 @@ unsigned long long stat_bytes_written = 0;
 void sigcatcher(int sig) {
   switch (sig) {
   case SIGTERM:
-  case SIGQUIT:
+#ifndef ETHERSRV_FOREGROUND_ONLY
+  case SIGQUIT: /* not defined on Windows */
+#endif
   case SIGINT:
     terminationflag = 1;
     break;
@@ -1360,6 +1368,7 @@ static void help(void) {
       "  -h        Display this information\n");
 }
 
+#ifndef ETHERSRV_FOREGROUND_ONLY
 /* daemonize the process, return 0 on success, non-zero otherwise */
 static int daemonize(void) {
   pid_t mypid;
@@ -1378,6 +1387,7 @@ static int daemonize(void) {
   }
   return (0);
 }
+#endif
 
 /* generates a formatted MAC address printout and returns a static buffer */
 static char *printmac(unsigned char *b) {
@@ -1396,8 +1406,13 @@ int main(int argc, char **argv) {
   char *intname, *root[26];
   struct struct_answcache *cacheptr;
   int opt;
+#ifdef ETHERSRV_FOREGROUND_ONLY
+  int daemon = 0; /* Win9x/DOS: the server always runs in the foreground */
+#define lockfile "ethersrv.lck"
+#else
   int daemon = 1; /* daemonize self by default */
 #define lockfile "/var/run/ethersrv.lock"
+#endif
 
   while ((opt = getopt(argc, argv, "dflhm:rs:v:")) != -1) {
     switch (opt) {
@@ -1485,7 +1500,9 @@ int main(int argc, char **argv) {
 
   /* setup signals catcher */
   signal(SIGTERM, sigcatcher);
-  signal(SIGQUIT, sigcatcher);
+#ifndef ETHERSRV_FOREGROUND_ONLY
+  signal(SIGQUIT, sigcatcher); /* not defined on Windows */
+#endif
   signal(SIGINT, sigcatcher);
 
   /* acquire the lock file (fail if already exists - likely ethersrv runs
@@ -1510,6 +1527,7 @@ int main(int argc, char **argv) {
    * immediately */
   fflush(stdout);
 
+#ifndef ETHERSRV_FOREGROUND_ONLY
   if (daemon != 0) {
     if (daemonize() != 0) {
       fprintf(stderr, "Error: failed to daemonize!\n");
@@ -1521,6 +1539,9 @@ int main(int argc, char **argv) {
      files without the host system stripping away group/other write permissions
    */
   umask(0);
+#else
+  (void)daemon;
+#endif
 
   /* throughput timer */
   /* throughput timer using gettimeofday instead of whole seconds */
