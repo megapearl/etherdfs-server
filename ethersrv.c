@@ -464,8 +464,8 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
     offset = le32toh(((uint32_t *)reqbuff)[0]);
     fileid = le16toh(wreqbuff[2]);
     len = le16toh(wreqbuff[3]);
-    DBG("Asking for %u bytes of the file #%u, starting offset %u\n", len,
-        fileid, offset);
+    DBG("Asking for %u bytes of the file #%u, starting offset %lu\n", len,
+        fileid, (unsigned long)offset);
     readlen = readfile(answ, fileid, offset, len);
     if (readlen < 0) {
       fprintf(stderr, "ERROR: invalid handle\n");
@@ -483,8 +483,8 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
       long writelen;
       offset = le32toh(((uint32_t *)reqbuff)[0]);
       fileid = le16toh(wreqbuff[2]);
-      DBG("Writing %u bytes into file #%u, starting offset %u\n",
-          reqbufflen - 6, fileid, offset);
+      DBG("Writing %u bytes into file #%u, starting offset %lu\n",
+          reqbufflen - 6, fileid, (unsigned long)offset);
       writelen = writefile(reqbuff + 6, fileid, offset, reqbufflen - 6);
       if (writelen < 0) {
         *ax = 5; /* "access denied" */
@@ -989,7 +989,7 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
     int32_t offs = le32toh(((uint32_t *)reqbuff)[0]);
     long fsize;
     unsigned short fss = le16toh(((unsigned short *)reqbuff)[2]);
-    DBG("SKFMEND on file #%u at offset %d\n", fss, offs);
+    DBG("SKFMEND on file #%u at offset %ld\n", fss, (long)offs);
     /* if arg is positive, zero it out */
     if (offs > 0)
       offs = 0;
@@ -1003,7 +1003,7 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
       offs += fsize;
       if (offs < 0)
         offs = 0;
-      DBG("new offset: %d\n", offs);
+      DBG("new offset: %ld\n", (long)offs);
       ((uint32_t *)answ)[0] = htole32(offs);
       reslen = 4;
     }

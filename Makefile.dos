@@ -1,0 +1,39 @@
+#
+# ethersrv makefile for DOS - cross-built with the DJGPP (i586-pc-msdosdjgpp)
+# toolchain on a Linux host. Produces a 32-bit protected-mode DOS executable
+# (ethersrv.exe) that runs under a DPMI host (CWSDPMI.EXE).
+#
+# DJGPP gives a flat 32-bit address space, so the fsdb[65536] cache and the
+# stdio file I/O compile unchanged; the DOS-specific work is confined to
+# net_dos.c (Crynwr packet driver via a DPMI real-mode callback) and
+# fsplat_dos.c (DJGPP libc + _chmod for DOS attributes). getopt and snprintf
+# are DJGPP-native (no Win9x-style wide-CRT trap), so no compat_getopt.c /
+# active compat_stdio.h here; daemonize/umask/signals are compiled out by
+# ETHERSRV_FOREGROUND_ONLY (which __DJGPP__/MSDOS trigger).
+#
+#   make -f Makefile.dos VERSION=v1.1.1
+#
+# Requires the DJGPP toolchain on PATH (or set DJGPP_PREFIX). At runtime the
+# target DOS box needs CWSDPMI.EXE (from the DJGPP site: v2misc/csdpmi*b.zip)
+# on the PATH, plus a loaded packet driver for the NIC.
+#
+DJGPP_PREFIX ?= i586-pc-msdosdjgpp-
+CC      = $(DJGPP_PREFIX)gcc
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo unknown)
+
+# gnu89 to match the sibling backends; no -pedantic (DJGPP DPMI extensions +
+# the __asm__ compiler barrier). -march=i386 keeps the code runnable on
+# pre-Pentium retro hardware (raise to i586 only if all targets are Pentium+).
+# The DBG variadic macro needs -Wno-variadic-macros; disk-space math needs
+# -Wno-long-long. All __dpmi_*/_go32_*/dosmem*/_fixpath live in the default
+# libc.a - no extra -l flag.
+CFLAGS  = -O2 -Wall -std=gnu89 -Wno-long-long -Wno-variadic-macros \
+          -march=i386 -mtune=i586 -DPVER=\"$(VERSION)\"
+
+SRC = ethersrv.c fs.c lock.c net_dos.c fsplat_dos.c
+
+ethersrv.exe: $(SRC) fs.h fsplat.h net.h endian_compat.h compat_stdio.h lock.h debug.h
+	$(CC) $(SRC) -o ethersrv.exe $(CFLAGS)
+
+clean:
+	rm -f ethersrv.exe *.o

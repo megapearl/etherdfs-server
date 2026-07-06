@@ -1,0 +1,20 @@
+# Reproducible DJGPP cross-toolchain for the DOS build of ethersrv.
+#
+#   docker build -f Dockerfile.djgpp -t edfs-djgpp .
+#   docker run --rm -v "$PWD:/src" edfs-djgpp make -f Makefile.dos VERSION=v1.1.1
+#
+# Produces ethersrv.exe (32-bit protected-mode coff-go32-exe). At RUNTIME a
+# pure-DOS box also needs CWSDPMI.EXE (a DPMI host) alongside it - fetch from
+# https://www.delorie.com/pub/djgpp/current/v2misc/csdpmi7b.zip ; Win9x DOS
+# boxes and DOSBox already provide a DPMI host. A Crynwr/FTP packet driver for
+# the NIC must be loaded first (net_dos.c drives it).
+#
+# The andrewwutw prebuilt toolchain (GCC 12.2.0, target i586-pc-msdosdjgpp) is
+# self-contained and relocatable, so PATH is the only setup needed.
+FROM debian:bookworm
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl ca-certificates bzip2 make git && rm -rf /var/lib/apt/lists/*
+RUN curl -fSL https://github.com/andrewwutw/build-djgpp/releases/download/v3.4/djgpp-linux64-gcc1220.tar.bz2 \
+      | tar -xj -C /opt
+ENV PATH=/opt/djgpp/bin:$PATH
+WORKDIR /src
