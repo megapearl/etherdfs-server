@@ -12,24 +12,34 @@
 #   make -f Makefile.win32 VERSION=v1.1.1
 #
 # ---------------------------------------------------------------------------
-# TOOLCHAIN CAVEAT for a binary that actually BOOTS on Win9x:
+# Win9x-boot notes:
 # Every Win32 call in ethersrv's own code is an ANSI *A entry point, all of
-# which exist on Win9x. HOWEVER the stock mingw-w64 C runtime startup imports
-# two wide symbols - GetModuleHandleW and GetEnvironmentVariableW - which are
-# non-functional stubs on Win9x, so a binary built with the stock Debian
-# mingw-w64 will not start there. This Makefile therefore serves as the
-# compile/link CI check (and runs fine under KernelEx / on NT). For a genuine
-# 9x-runnable executable, build with the fsb4000 "gcc-for-Windows98" toolchain
-# (a mingw fork with a Win9x-safe *A CRT and i486/i586 codegen); the sources
-# here need no change - only CC and the SDK/lib paths differ.
-# GetDiskFreeSpaceExA additionally needs Win95-OSR2+ (present on 98/ME).
+# which exist on Win9x. Three wide-symbol traps in the stock mingw-w64 runtime
+# are neutralised so a plain Debian cross-build BOOTS on 9x - no special
+# gcc-for-Windows98 toolchain or Wine needed:
+#   1. printf -> GetModuleHandleW : killed by -D__USE_MINGW_ANSI_STDIO=0 (use
+#      msvcrt's own printf instead of the mingw wrapper that dlopen's msvcrt).
+#   2. snprintf -> GetModuleHandleW : killed by compat_stdio.h, which maps
+#      snprintf to a NUL-terminating _vsnprintf wrapper.
+#   3. getopt -> GetEnvironmentVariableW : killed by bundling compat_getopt.c,
+#      whose getopt overrides the libc one (which reads POSIXLY_CORRECT wide).
+# Verify zero wide KERNEL32 imports with:
+#   i686-w64-mingw32-objdump -p ethersrv.exe | grep -E '[A-Za-z0-9_]+W$'
+# GetDiskFreeSpaceExA needs Win95-OSR2+ and GetAdaptersInfo (iphlpapi) Win98+;
+# both are present on all Win98/ME.
 # ---------------------------------------------------------------------------
 #
 CC      = i686-w64-mingw32-gcc
 SDK     = thirdparty/npcap-sdk
 VERSION ?= unknown
 
+# __USE_MINGW_ANSI_STDIO=0 is what makes the binary bootable on Win9x: the
+# mingw ANSI-stdio wrapper (the i686 default) resolves msvcrt at runtime via
+# GetModuleHandleW(L"msvcrt.dll"), and GetModuleHandleW is a non-functional stub
+# on Win9x. Forcing msvcrt's own printf avoids that wide call entirely (the
+# server's two %llu logs were switched to %lu so plain msvcrt can format them).
 CFLAGS  = -O2 -std=gnu89 -Wall -Wno-long-long -march=i586 -mtune=i586 \
+          -D__USE_MINGW_ANSI_STDIO=0 \
           -DWINVER=0x0400 -D_WIN32_WINDOWS=0x0410 -DPVER=\"$(VERSION)\" \
           -I$(SDK)/Include
 LDFLAGS = -mconsole
@@ -37,9 +47,9 @@ LDFLAGS = -mconsole
 # types pcap.h needs, iphlpapi provides GetAdaptersInfo() for MAC discovery.
 LIBS    = $(SDK)/Lib/wpcap.lib -lws2_32 -liphlpapi
 
-SRC = ethersrv.c fs.c lock.c net_win.c fsplat_win.c
+SRC = ethersrv.c fs.c lock.c net_win.c fsplat_win.c compat_getopt.c
 
-ethersrv.exe: $(SRC) fs.h fsplat.h net.h endian_compat.h lock.h debug.h
+ethersrv.exe: $(SRC) fs.h fsplat.h net.h endian_compat.h compat_stdio.h compat_getopt.h lock.h debug.h
 	$(CC) $(SRC) -o $@ $(CFLAGS) $(LDFLAGS) $(LIBS)
 
 clean:

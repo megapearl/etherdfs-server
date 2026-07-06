@@ -41,6 +41,7 @@
 #include <time.h>   /* time() */
 #include <unistd.h> /* getopt(), optind */
 
+#include "compat_stdio.h"  /* Win9x-safe snprintf (no-op elsewhere) */
 #include "debug.h"
 #include "endian_compat.h" /* htons()/le16toh()/htole16() without glibc headers */
 #include "fs.h"
@@ -444,7 +445,10 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
       diskspace = 2lu * 1024 * 1024 * 1024 - 1;
     if (freespace >= 2lu * 1024 * 1024 * 1024)
       freespace = 2lu * 1024 * 1024 * 1024 - 1;
-    DBG("TOTAL: %llu KiB ; FREE: %llu KiB\n", diskspace >> 10, freespace >> 10);
+    /* %lu (not %llu): msvcrt's printf on Win9x has no C99 long-long support;
+     * both values are clamped <2 GiB above, so they fit an unsigned long. */
+    DBG("TOTAL: %lu KiB ; FREE: %lu KiB\n", (unsigned long)(diskspace >> 10),
+        (unsigned long)(freespace >> 10));
     *ax = 1; /* AX: media id (8 bits) | sectors per cluster (8 bits) -- MSDOS
                 tolerates only 1 here! */
     wansw[1] = htole16(32768);     /* CX: bytes per sector */
@@ -1565,8 +1569,11 @@ int main(int argc, char **argv) {
         /* Print only if > 10 KB/s combined throughput to accommodate slower
          * MS-DOS packet drivers */
         if (total_bytes > (10ULL * 1024ULL)) {
-          printf("[Throughput] Read: %llu KB/s | Write: %llu KB/s\n",
-                 stat_bytes_read / 1024ULL, stat_bytes_written / 1024ULL);
+          /* %lu (not %llu): msvcrt's printf on Win9x lacks C99 long-long; KB/s
+           * over a 1 s window fits an unsigned long on every realistic link. */
+          printf("[Throughput] Read: %lu KB/s | Write: %lu KB/s\n",
+                 (unsigned long)(stat_bytes_read / 1024ULL),
+                 (unsigned long)(stat_bytes_written / 1024ULL));
           fflush(stdout);
         }
         stat_bytes_read = 0;

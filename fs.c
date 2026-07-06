@@ -10,6 +10,7 @@
 #include <string.h>
 #include <time.h> /* time_t, struct tm... */
 
+#include "compat_stdio.h" /* Win9x-safe snprintf (no-op elsewhere) */
 #include "debug.h"
 #include "fs.h"     /* include self for control */
 #include "fsplat.h" /* platform filesystem access (POSIX/Win9x/DOS) */

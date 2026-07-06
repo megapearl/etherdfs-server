@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "compat_stdio.h" /* Win9x-safe snprintf */
 #include "fsplat.h"
 
 /* FILETIME (100 ns since 1601-01-01 UTC) -> time_t (seconds since 1970). The
