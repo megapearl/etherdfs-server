@@ -11,13 +11,13 @@ ROOT="$(pwd)"             # absolute repo root; the tests chdir into /tmp fixtur
 apk add --no-cache gcc musl-dev linux-headers libpcap-dev >/dev/null 2>&1 || true
 
 echo "=== compiling test_lfn (fs.c unit test) ==="
-gcc tests/test_lfn.c fs.c -o /tmp/test_lfn -O2 -Wall -std=gnu89 -Wno-long-long -I.
+gcc tests/test_lfn.c fs.c fsplat_posix.c -o /tmp/test_lfn -O2 -Wall -std=gnu89 -Wno-long-long -I.
 
 echo "=== compiling test_proto (process() wire test; includes ethersrv.c) ==="
 # net_linux.c supplies net_open/recv/send/close: ethersrv.c's (renamed) main
 # references them, so they must be linked even though the wire test never calls
 # the network layer.
-gcc tests/test_proto.c fs.c lock.c net_linux.c -o /tmp/test_proto -O2 -std=gnu89 -Wno-long-long -lpcap -I.
+gcc tests/test_proto.c fs.c lock.c net_linux.c fsplat_posix.c -o /tmp/test_proto -O2 -std=gnu89 -Wno-long-long -lpcap -I.
 
 # build a fixture directory with the regression name set
 FIX=/tmp/lfn_fixture

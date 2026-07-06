@@ -16,8 +16,8 @@ LDFLAGS = -lpcap
 
 CC = gcc
 
-ethersrv: ethersrv.c fs.c fs.h lock.c lock.h debug.h net.h net_linux.c
-	$(CC) ethersrv.c fs.c lock.c net_linux.c -o ethersrv $(CFLAGS) $(LDFLAGS)
+ethersrv: ethersrv.c fs.c fs.h fsplat.h fsplat_posix.c lock.c lock.h debug.h net.h net_linux.c
+	$(CC) ethersrv.c fs.c lock.c net_linux.c fsplat_posix.c -o ethersrv $(CFLAGS) $(LDFLAGS)
 
 clean:
 	rm -f ethersrv *.o

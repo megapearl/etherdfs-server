@@ -3,25 +3,16 @@
  * Copyright (C) 2017 Mateusz Viste
  */
 
-#include <dirent.h>
 #include <errno.h>
-#include <fcntl.h>
-#ifdef __linux__
-#include <linux/msdos_fs.h>
-#endif
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h> /* free() */
 #include <string.h>
-#include <sys/ioctl.h>
-#include <sys/stat.h>    /* stat() */
-#include <sys/statvfs.h> /* statvfs() for diskfree calls */
-#include <sys/types.h>
 #include <time.h> /* time_t, struct tm... */
-#include <unistd.h>
 
 #include "debug.h"
-#include "fs.h" /* include self for control */
+#include "fs.h"     /* include self for control */
+#include "fsplat.h" /* platform filesystem access (POSIX/Win9x/DOS) */
 
 /* ===================================================================
  * Codepage conversion (increment 6): the Linux filesystem stores names as
@@ -496,10 +487,10 @@ static int matchlfn2mask(const char *msk, const char *fil) {
  * DOS attr flags: 1=RO 2=HID 4=SYS 8=VOL 16=DIR 32=ARCH 64=DEVICE */
 unsigned char getitemattr(char *i, struct fileprops *fprops,
                           unsigned char fatflag) {
-  uint32_t attr;
-  int fd;
-  struct stat statbuf;
-  if (stat(i, &statbuf) != 0)
+  int is_dir;
+  unsigned long long fsize;
+  time_t mtime;
+  if (plat_stat(i, &is_dir, &fsize, &mtime) != 0)
     return (0xff); /* error (probably doesn't exist) */
   /* zero out fprops and fill it out */
   if (fprops != NULL) {
@@ -512,61 +503,42 @@ unsigned char getitemattr(char *i, struct fileprops *fprops,
     }
     /* zero out struct and set timestamp & fcbname */
     memset(fprops, 0, sizeof(struct fileprops));
-    fprops->ftime = time2dos(statbuf.st_mtime);
-    fprops->filetime = time2filetime(statbuf.st_mtime);
+    fprops->ftime = time2dos(mtime);
+    fprops->filetime = time2filetime(mtime);
     filename2fcb(fprops->fcbname, fname);
   }
   /* is this is a directory? */
-  if (S_ISDIR(statbuf.st_mode)) {
+  if (is_dir) {
     if (fprops != NULL)
       fprops->fattr = 16;
     return (16);
   }
   /* not a directory, set size */
   if (fprops != NULL)
-    fprops->fsize = statbuf.st_size;
+    fprops->fsize = fsize;
   /* if not a FAT drive, return a fake attribute of 0x20 (archive) */
   if (fatflag == 0)
     return (0x20);
-#ifdef __linux__
-  /* try to fetch DOS attributes by calling the FAT IOCTL API */
-  fd = open(i, O_RDONLY);
-  if (fd == -1)
-    return (0xff);
-  if (ioctl(fd, (int)FAT_IOCTL_GET_ATTRIBUTES, &attr) < 0) {
-    fprintf(stderr, "Failed to fetch attributes of '%s'\n", i);
-    close(fd);
-    return (0);
-  } else {
-    close(fd);
+  /* fetch the real DOS attribute bits (FAT IOCTL on Linux, GetFileAttributes on
+   * Win9x, INT 21h on DOS; archive fallback where no such API exists) */
+  {
+    unsigned char attr;
+    int r = plat_getfatattr(i, &attr);
+    if (r < 0)
+      return (0xff); /* could not open the item */
+    if (r > 0) {
+      fprintf(stderr, "Failed to fetch attributes of '%s'\n", i);
+      return (0); /* opened, but attributes unreadable */
+    }
     if (fprops != NULL)
       fprops->fattr = attr;
     return (attr);
   }
-#else
-  /* On non-Linux, simulate archive bit for all FAT formatted files as fallback
-   */
-  return (0x20);
-#endif
 }
 
 /* set attributes fattr on file i. returns 0 on success, non-zero otherwise. */
 int setitemattr(char *i, unsigned char fattr) {
-#ifdef __linux__
-  int fd, res;
-  fd = open(i, O_RDONLY);
-  if (fd == -1)
-    return (-1);
-  res = ioctl(fd, (int)FAT_IOCTL_SET_ATTRIBUTES, &fattr);
-  close(fd);
-  if (res < 0)
-    return (-1);
-  return (0);
-#else
-  /* On non-Linux systems, we do not support setting DOS FAT attributes natively
-   */
-  return (0);
-#endif
+  return (plat_setfatattr(i, fattr));
 }
 
 /* directory entry used for deterministic SFN (~N) assignment, shared between
@@ -598,13 +570,13 @@ static long gendirlist(struct sfsdb *root, unsigned char fatflag,
                        const char *vollabel, int is_root) {
   char fullpath[1024];
   int fullpathoffset;
-  struct dirent *diridx;
-  DIR *dp;
+  struct plat_dirent ent;
+  plat_dir *dp;
   struct sdirlist *lastnode = NULL, *newnode, *checknode;
   long res = 0;
   freedirlist(root->dirlist);
   root->dirlist = NULL;
-  dp = opendir(root->name);
+  dp = plat_opendir(root->name);
   if (dp == NULL)
     return (-1);
   fullpathoffset = sprintf(fullpath, "%s/", root->name);
@@ -678,7 +650,7 @@ static long gendirlist(struct sfsdb *root, unsigned char fatflag,
     char **names = NULL;
     long ncount = 0, ncap = 0, ni;
 
-    while ((diridx = readdir(dp)) != NULL) {
+    while (plat_readdir(dp, &ent)) {
       char *dup;
       if (ncount == ncap) {
         char **tmp;
@@ -688,12 +660,12 @@ static long gendirlist(struct sfsdb *root, unsigned char fatflag,
           break; /* out of mem: proceed with what we collected so far */
         names = tmp;
       }
-      dup = strdup(diridx->d_name);
+      dup = strdup(ent.lfn);
       if (dup == NULL)
         break;
       names[ncount++] = dup;
     }
-    closedir(dp);
+    plat_closedir(dp);
 
     if (names != NULL)
       qsort(names, (size_t)ncount, sizeof(char *), cmp_names);
@@ -877,7 +849,7 @@ int createfile(struct fileprops *f, char *d, char *fn, unsigned char attr,
   fclose(fd);
 
   /* ensure file is mutually writable by others on the host system too */
-  chmod(fullpath, 0666);
+  plat_setnewfileperms(fullpath);
 
   /* set attribs (only if FAT drive) */
   if (fatflag != 0) {
@@ -893,32 +865,22 @@ int createfile(struct fileprops *f, char *d, char *fn, unsigned char attr,
 /* returns disks total size, in bytes, or 0 on error. also sets dfree to the
  * amount of available bytes */
 unsigned long long diskinfo(char *path, unsigned long long *dfree) {
-  struct statvfs buf;
-  unsigned long long res;
-  if (statvfs(path, &buf) != 0)
+  unsigned long long total, freeb;
+  if (plat_diskspace(path, &total, &freeb) != 0)
     return (0);
-  res = buf.f_blocks;
-  res *= buf.f_frsize;
-  *dfree = buf.f_bfree;
-  *dfree *= buf.f_bsize;
-  return (res);
+  *dfree = freeb;
+  return (total);
 }
 
 /* try to create directory, return 0 on success, non-zero otherwise */
-int makedir(char *d) { return (mkdir(d, 0777)); }
+int makedir(char *d) { return (plat_mkdir(d)); }
 
 /* try to remove directory, return 0 on success, non-zero otherwise */
-int remdir(char *d) {
-  struct stat st;
-  if (lstat(d, &st) == 0 && S_ISLNK(st.st_mode)) {
-    return unlink(d);
-  }
-  return (rmdir(d));
-}
+int remdir(char *d) { return (plat_rmdir(d)); }
 
 /* change to directory d, return 0 if worked, non-zero otherwise (used
  * essentially to check whether the directory exists or not) */
-int changedir(char *d) { return (chdir(d)); }
+int changedir(char *d) { return (plat_chdir(d)); }
 
 #define READAHEAD_SIZE 65536
 static unsigned char readahead_buff[READAHEAD_SIZE];
@@ -983,7 +945,7 @@ long writefile(unsigned char *buff, unsigned short fss, unsigned long offset,
   /* if len is 0, then it means "truncate" or "extend" ! */
   if (len == 0) {
     DBG("truncate '%s' to %lu bytes\n", fname, offset);
-    if (truncate(fname, offset) != 0)
+    if (plat_truncate(fname, offset) != 0)
       fprintf(stderr, "Error: truncate() failed\n");
     return (0);
   }
@@ -1011,8 +973,8 @@ int delfiles(char *pattern) {
   char dirnamefcb[12];
   char *dir, *fil;
   char filfcb[12];
-  struct dirent *diridx;
-  DIR *dp;
+  struct plat_dirent ent;
+  plat_dir *dp;
   /* scan the pattern for '?' characters, and find where the file part starts,
    * also copy the pattern to patterncopy[] */
   for (i = 0; pattern[i] != 0; i++) {
@@ -1025,7 +987,7 @@ int delfiles(char *pattern) {
   patterncopy[i] = 0;
   /* if regular file, delete it right away*/
   if (ispattern == 0) {
-    if (unlink(pattern) != 0) {
+    if (plat_unlink(pattern) != 0) {
       DBG("Error: failure to delete file '%s' (%s)\n", pattern,
           strerror(errno));
       return (-1);
@@ -1038,55 +1000,33 @@ int delfiles(char *pattern) {
   fil = patterncopy + fileoffset + 1;
   filename2fcb(filfcb, fil);
   /* iterate over the directory and delete whatever is matching the pattern */
-  dp = opendir(dir);
+  dp = plat_opendir(dir);
   if (dp == NULL)
     return (-1);
-  for (;;) {
-    diridx = readdir(dp);
-    if (diridx == NULL)
-      break;
+  while (plat_readdir(dp, &ent)) {
     /* skip directories */
-    if (diridx->d_type == DT_DIR)
+    if (ent.is_dir)
       continue;
     /* if match, delete the file and continue */
-    filename2fcb(dirnamefcb, diridx->d_name);
+    filename2fcb(dirnamefcb, ent.lfn);
     if (matchfile2mask(filfcb, dirnamefcb) == 0) {
       char fname[512];
-      sprintf(fname, "%s/%s", dir, diridx->d_name);
-      if (unlink(fname) != 0)
+      sprintf(fname, "%s/%s", dir, ent.lfn);
+      if (plat_unlink(fname) != 0)
         fprintf(stderr, "failed to delete '%s'\n", fname);
     }
   }
-  closedir(dp);
+  plat_closedir(dp);
 
   return (0);
 }
 
 /* rename fn1 into fn2 */
-int renfile(char *fn1, char *fn2) { return (rename(fn1, fn2)); }
+int renfile(char *fn1, char *fn2) { return (plat_rename(fn1, fn2)); }
 
 /* checks if a path resides on a FAT filesystem, returns 0 if so, non-zero
  * otherwise */
-int isfat(char *d) {
-#ifdef __linux__
-  int fd;
-  uint32_t volid;
-  /* test if I can fetch the serial id through calling the FAT IOCTL API */
-  fd = open(d, O_RDONLY);
-  if (fd == -1)
-    return (-1);
-  if (ioctl(fd, (int)FAT_IOCTL_GET_VOLUME_ID, (int *)&volid) < 0) {
-    close(fd);
-    return (-1);
-  }
-  close(fd);
-  return (0);
-#else
-  /* without Linux ioctls, fallback to treating it as non-FAT so attributes
-   * aren't used */
-  return (-1);
-#endif
-}
+int isfat(char *d) { return (plat_isfat(d)); }
 
 /* returns the size of an open file (or -1 on error) */
 long getfopsize(unsigned short fss) {
@@ -1114,8 +1054,8 @@ int resolve_component(const char *dir_path, const char *wire_name,
                       char *out_real, char *out_sfn) {
   struct sfn_entry *local_sfns;
   int capacity = 1024;
-  DIR *dp;
-  struct dirent *diridx;
+  plat_dir *dp;
+  struct plat_dirent ent;
   int collision_idx;
   char tempsfn[14];
   int count = 0;
@@ -1127,15 +1067,15 @@ int resolve_component(const char *dir_path, const char *wire_name,
   if (local_sfns == NULL)
     return (-1);
 
-  dp = opendir(dir_path);
+  dp = plat_opendir(dir_path);
   if (dp == NULL) {
     free(local_sfns);
     return (-1);
   }
 
-  while ((diridx = readdir(dp)) != NULL) {
+  while (plat_readdir(dp, &ent)) {
     /* Skip . and .. to save processing */
-    if (strcmp(diridx->d_name, ".") == 0 || strcmp(diridx->d_name, "..") == 0)
+    if (strcmp(ent.lfn, ".") == 0 || strcmp(ent.lfn, "..") == 0)
       continue;
 
     if (count >= capacity) {
@@ -1148,12 +1088,12 @@ int resolve_component(const char *dir_path, const char *wire_name,
       local_sfns = new_sfns;
     }
 
-    strcpy(local_sfns[count].lfn, diridx->d_name);
-    cp_disk2wire(diridx->d_name, local_sfns[count].cp437,
+    strcpy(local_sfns[count].lfn, ent.lfn);
+    cp_disk2wire(ent.lfn, local_sfns[count].cp437,
                  sizeof(local_sfns[count].cp437));
     count++;
   }
-  closedir(dp);
+  plat_closedir(dp);
 
   /* Sort entries into the SAME deterministic order gendirlist() uses, so the
    * ~N collision suffixes assigned below match the ones FindFirst handed to
@@ -1394,8 +1334,8 @@ void sfn_for_name_in_dir(const char *dir_path, const char *target_lfn,
                          char *out_sfn) {
   struct sfn_entry *list;
   int capacity = 1024, count = 0, i, j;
-  DIR *dp;
-  struct dirent *diridx;
+  plat_dir *dp;
+  struct plat_dirent ent;
   char tempsfn[14];
   int collision_idx, collision_found;
 
@@ -1412,13 +1352,13 @@ void sfn_for_name_in_dir(const char *dir_path, const char *target_lfn,
   list = malloc(capacity * sizeof(struct sfn_entry));
   if (list == NULL)
     return;
-  dp = opendir(dir_path);
+  dp = plat_opendir(dir_path);
   if (dp == NULL) {
     free(list);
     return;
   }
-  while ((diridx = readdir(dp)) != NULL) {
-    if (strcmp(diridx->d_name, ".") == 0 || strcmp(diridx->d_name, "..") == 0)
+  while (plat_readdir(dp, &ent)) {
+    if (strcmp(ent.lfn, ".") == 0 || strcmp(ent.lfn, "..") == 0)
       continue;
     if (count >= capacity) {
       struct sfn_entry *grown;
@@ -1428,11 +1368,11 @@ void sfn_for_name_in_dir(const char *dir_path, const char *target_lfn,
         break;
       list = grown;
     }
-    snprintf(list[count].lfn, sizeof(list[count].lfn), "%s", diridx->d_name);
-    cp_disk2wire(diridx->d_name, list[count].cp437, sizeof(list[count].cp437));
+    snprintf(list[count].lfn, sizeof(list[count].lfn), "%s", ent.lfn);
+    cp_disk2wire(ent.lfn, list[count].cp437, sizeof(list[count].cp437));
     count++;
   }
-  closedir(dp);
+  plat_closedir(dp);
 
   qsort(list, (size_t)count, sizeof(struct sfn_entry), cmp_sfn_entry);
 
