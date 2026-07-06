@@ -46,6 +46,11 @@ DOS client TSR live in this repository.
 * **Dynamic volume labels** (`VOLUME_LABEL`).
 * **Standalone Docker support** - an `entrypoint.sh` that waits for the
   physical interface to appear, preventing container crash-loops.
+* **Multi-platform server** *(this fork, branch `server-multiplatform`)* - the
+  same wire protocol and LFN engine build for **Linux** (libpcap), **Windows
+  9x** (WinPcap 3.1, native VFAT long names) and **MS-DOS** (DJGPP protected
+  mode, Crynwr packet driver), behind two thin shims (`net.h` for packet I/O,
+  `fsplat.h` for the filesystem). See *Building from source*.
 
 ## 📖 What is EtherDFS?
 
@@ -209,6 +214,44 @@ Or build the container (the release build injects the version via a build arg):
 ```bash
 docker build -t etherdfs-server .                     # version = "unknown" (no git in context)
 docker build --build-arg APP_VERSION=$(git describe --tags) -t etherdfs-server .
+```
+
+### Server (Windows 9x)
+
+The same server cross-builds into a Win32 console `ethersrv.exe` that runs on
+Windows 95/98/ME with **WinPcap 3.1** (the last WinPcap supporting 9x)
+installed. Long file names come natively from VFAT. Build with the stock
+Debian mingw-w64 cross-compiler plus the Npcap SDK headers (build-time only;
+unpack under `thirdparty/npcap-sdk`):
+
+```bash
+apt-get install gcc-mingw-w64-i686
+make -f Makefile.win32 VERSION=$(git describe --tags)
+```
+
+The binary is deliberately free of wide (`*W`) KERNEL32 imports - the three
+mingw runtime traps that would break it on 9x (printf/snprintf resolving
+msvcrt via `GetModuleHandleW`, getopt reading the wide environment) are
+neutralised via `-D__USE_MINGW_ANSI_STDIO=0`, `compat_stdio.h` and
+`compat_getopt.c`. See the notes in `Makefile.win32`. Run it as:
+
+```
+ethersrv.exe -f \Device\NPF_{adapter-GUID} C:\SHARE
+```
+
+### Server (MS-DOS)
+
+The server also cross-builds into a 32-bit protected-mode DOS `ethersrv.exe`
+(DJGPP; on pure DOS ship `CWSDPMI.EXE` alongside it - Win9x DOS boxes and
+DOSBox already provide a DPMI host). It talks to a **Crynwr/FTP packet
+driver** directly (INT 60h-80h autodetected), so load the NIC's packet driver
+first. Long names require an LFN provider (e.g. DOSLFN) on the server volume;
+without one the server serves 8.3 names only. Reproducible toolchain via
+docker:
+
+```bash
+docker build -f Dockerfile.djgpp -t edfs-djgpp .
+docker run --rm -v "$PWD:/src" edfs-djgpp make -f Makefile.dos VERSION=$(git describe --tags)
 ```
 
 ### Client (DOS TSR)
