@@ -7,13 +7,17 @@
 #   sudo docker run --rm -v "$PWD":/src -w /src alpine:latest sh tests/run.sh
 set -e
 cd "$(dirname "$0")/.."   # repo root (server sources live here)
+ROOT="$(pwd)"             # absolute repo root; the tests chdir into /tmp fixtures
 apk add --no-cache gcc musl-dev linux-headers libpcap-dev >/dev/null 2>&1 || true
 
 echo "=== compiling test_lfn (fs.c unit test) ==="
 gcc tests/test_lfn.c fs.c -o /tmp/test_lfn -O2 -Wall -std=gnu89 -Wno-long-long -I.
 
 echo "=== compiling test_proto (process() wire test; includes ethersrv.c) ==="
-gcc tests/test_proto.c fs.c lock.c -o /tmp/test_proto -O2 -std=gnu89 -Wno-long-long -lpcap -I.
+# net_linux.c supplies net_open/recv/send/close: ethersrv.c's (renamed) main
+# references them, so they must be linked even though the wire test never calls
+# the network layer.
+gcc tests/test_proto.c fs.c lock.c net_linux.c -o /tmp/test_proto -O2 -std=gnu89 -Wno-long-long -lpcap -I.
 
 # build a fixture directory with the regression name set
 FIX=/tmp/lfn_fixture
@@ -48,7 +52,7 @@ else
   echo "  FAIL: CP437 create did not produce the UTF-8 disk name"; exit 1
 fi
 
-cd "$(dirname "$0")/.."  # back to repo root
+cd "$ROOT"  # back to repo root (absolute; we are currently inside the fixture dir)
 
 echo; echo "########## FTCONV TEST (client 71A7h date math, host build) ##########"
 gcc tests/test_ftconv.c -o /tmp/test_ftconv -O2 -Wall -Iclient/src
