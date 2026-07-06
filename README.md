@@ -71,7 +71,7 @@ that ship together:
 
 | Half | Where | What it does |
 | :--- | :--- | :--- |
-| **Server** | `ethersrv.c` / `fs.c` | Answers additive LFN wire-opcodes `0x40`-`0x4E` (FindFirst/Next, Open, Create, Rename, Mkdir, TrueName, VolInfo), generates deterministic `~1` aliases, and converts names between UTF-8 (disk) and the OEM codepage (wire). |
+| **Server** | `ethersrv.c` / `fs.c` | Answers additive LFN wire-opcodes `0x40`-`0x4E` (FindFirst/Next, Open, Create, Rename, Mkdir, TrueName, VolInfo), generates standard Win95 `~N` aliases (matching DOSLFN/Windows), and converts names between UTF-8 (disk) and the OEM codepage (wire). |
 | **Client** | `client/` (`ETHERDFS.EXE`) | A resident TSR that hooks `INT 21h` and serves the Win95 LFN API (`71xx`) for its own drives - `714E/714F` FindFirst/Next, `716C` open/create, `7160` truename, `7156/7141/7139/713A/713B/7143/7147` ren/del/md/rd/cd/attrib/getcwd - translating them to the server opcodes or passing them down as 8.3 aliases. |
 
 What works on the DOS side once both are loaded:
@@ -88,16 +88,26 @@ stable `NAME~1.EXT` aliases for every long name.
 ### DOSLFN coexistence & load order
 
 If you also use [DOSLFN](https://www.freedos.org/) for long names on *local*
-FAT drives, load it **before** EtherDFS:
+FAT drives, load it **with the `f-` (fallback-off) switch, before** EtherDFS:
 
 ```bat
-DOSLFN.COM            REM local FAT drives get LFN from DOSLFN
+DOSLFN.COM f-         REM local FAT drives get LFN from DOSLFN; f- makes it
+                      REM leave non-local drives to the handler behind it
 ...
 ETHERDFS.EXE :: C-E   REM network drive(s) get LFN from EtherDFS (load last)
 ```
 
-EtherDFS installs on top of the `INT 21h` chain and serves LFN for *its* drives
-only, chaining every other drive down to DOSLFN. (Loading EtherDFS last also
+The `f-` switch matters. DOSLFN's default *fallback mode* tries to synthesize
+LFN for drives it cannot read directly - a network redirector like EtherDFS's
+included - which mangles directory navigation on that drive (a shell can no
+longer leave a subdirectory). `f-` disables that fallback, so DOSLFN keeps
+native LFN for local FAT drives and leaves the network drive entirely to
+EtherDFS. Loading EtherDFS **last** puts its `INT 21h` hook in front, so LFN
+calls for its drives reach EtherDFS directly - including drive-less, current-
+directory-relative paths, which it resolves via the DOS SDA + CDS.
+
+EtherDFS serves LFN for *its* drives only, chaining every other drive down to
+DOSLFN. (Loading EtherDFS last also
 lets it cleanly unload itself with `ETHERDFS.EXE /U`, provided no other TSR -
 a telnet server, a resident file manager - hooked `INT 2Fh`/`INT 21h` after it.)
 
@@ -166,8 +176,9 @@ You need two things on the vintage PC:
 REM 1. Load the packet driver (vector 0x60 is conventional)
 C:\NET\3C509.COM 0x60
 
-REM 2. (optional) DOSLFN for LFN on LOCAL FAT drives -- load BEFORE EtherDFS
-C:\NET\DOSLFN.COM
+REM 2. (optional) DOSLFN for LFN on LOCAL FAT drives -- load with f- (fallback
+REM    off, so it leaves the network drive to EtherDFS) and BEFORE EtherDFS
+C:\NET\DOSLFN.COM f-
 
 REM 3. Load EtherDFS -- ":: " auto-discovers the server; "C-E" maps remote C: to local E:
 C:\NET\ETHERDFS\ETHERDFS.EXE :: C-E
@@ -255,6 +266,13 @@ the (single-threaded) server via log-driver backpressure.
 
 **Accented name shows as `_` or won't open** - set `ETHERDFS_CODEPAGE` to
 match your DOS box's active codepage (`437` or `850`).
+
+**7-Zip (DJGPP) "No such file" on a name with several dots** - e.g.
+`x (1.2.3).7z`. DJGPP-built tools reject multi-dot names on a *network* drive
+locally, before any server request (they treat local drives differently). This
+is a DJGPP limitation, not an EtherDFS one: `DIR`, `COPY` and file managers
+handle such names fine. Work around it by extracting on a local drive, renaming
+to a single dot, or passing the file's 8.3 alias.
 
 ---
 
