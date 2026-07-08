@@ -1799,6 +1799,28 @@ void __interrupt __far inthandler21(union INTPACK r) {
       return;               /* handled here -- do NOT chain */
     }
   }
+  /* DOSLFN treats our PHYSICAL redirector drive as a native local FAT volume and
+   * services the LEGACY MkDir (INT 21h AH=39h) itself, trying to write the new
+   * directory's VFAT long-name entry via direct sector I/O - which our sectorless
+   * drive cannot do, so a plain `MD X:\dir` (COMMAND.COM, batch, or any program
+   * whose runtime issues AH=39h) HANGS on our drive. Norton/Volkov Commander work
+   * because they issue the LFN MkDir 7139h, which reaches us directly. Our INT 21h
+   * hook runs BEFORE DOSLFN (etherdfs loads after doslfn), so rewrite a legacy
+   * MkDir of a drive-qualified path on one of our drives into its LFN twin: AH
+   * 39h -> 71h keeps AL=39h, i.e. AX=7139h, with the same DS:DX ASCIIZ path and
+   * the same CF/AX return. The AH=71h dispatch below then sends it to the server,
+   * bypassing DOSLFN. Only drive-qualified paths ("X:\..") are rerouted - the
+   * exact condition the 7139h branch itself accepts - so the rewrite can never
+   * hand that branch a call it would decline and fall through into the chain with
+   * a mangled AH. (DN OSP's own F7 make-directory does not take this path: it
+   * expands via 7160h and creates via the LFN 7139h; its silent-no-op on our
+   * drive was a separate 7160h/CL=0 bug, fixed in the TRUENAME handler below.) */
+  if (r.h.ah == 0x39) {
+    unsigned char far *pp = MK_FP(r.w.ds, r.w.dx);
+    unsigned char idx = 0xff;
+    if ((pp[0] != 0) && (pp[1] == ':')) idx = DRIVETONUM(pp[0]);
+    if ((idx <= 25) && (glob_data.ldrv[idx] != 0xff)) r.h.ah = 0x71;
+  }
   if (r.h.ah == 0x71) {
     unsigned char do_lfn = 0; /* set to 1 to run the guarded server round-trip */
     /* Nested-context flag, computed BEFORE any branch may write the shared
@@ -1896,16 +1918,47 @@ void __interrupt __far inthandler21(union INTPACK r) {
       idx = lfn_claimdrv(pp);
       if ((idx <= 25) && (glob_data.ldrv[idx] != 0xff)) {
         if (r.h.cl == 0) {
-          /* canonicalize WITHOUT shortening (RBIL rb-3206): callers (4DOS
-           * mkfname) pass already-qualified paths; return it uppercased */
+          /* 7160h CL=0 = canonicalize to an ABSOLUTE, un-shortened path (Win9x
+           * uppercases the SFN parts). The old code only uppercased the input,
+           * assuming it was already drive-qualified -- true for 4DOS's mkfname,
+           * but NOT for DN OSP 6.4.0's DPMI build: its SIM95TrueName expands a
+           * bare RELATIVE make-dir name ("QDIR") through CL=0, and when the
+           * result carries no drive letter DN's CreateDirInheritance bails
+           * silently ("no ':' -> Exit") -- so F7 "new directory" did nothing on
+           * our drive. Make a relative path absolute here by prepending "X:" +
+           * the current directory (from the CDS, the same source lfn_server_path
+           * uses), so "QDIR" at E:\OS canonicalizes to "E:\OS\QDIR". A path that
+           * is already drive-qualified or UNC is copied (uppercased) unchanged. */
           unsigned char far *dst = MK_FP(r.w.es, r.w.di);
-          unsigned short k2;
+          unsigned char far *sp = pp;
+          unsigned short n = 0;
           unsigned char c;
-          for (k2 = 0; (pp[k2] != 0) && (k2 < 260); k2++) {
-            c = pp[k2];
-            dst[k2] = ((c >= 'a') && (c <= 'z')) ? (unsigned char)(c - 32) : c;
+          if ((pp[1] != ':') && !((pp[0] == '\\') && (pp[1] == '\\'))) {
+            dst[0] = (unsigned char)('A' + idx);
+            dst[1] = ':';
+            n = 2;
+            if ((pp[0] != '\\') && (pp[0] != '/')) { /* truly relative: add cwd */
+              struct cdsstruct far *cds =
+                  (struct cdsstruct far *)glob_sdaptr->drive_cdsptr;
+              unsigned char far *cp = cds->current_path;
+              if ((cp[0] != 0) && (cp[1] == ':') &&
+                  ((unsigned char)DRIVETONUM(cp[0]) == idx)) {
+                unsigned short i = 2; /* skip the CDS path's own "X:" */
+                while ((cp[i] != 0) && (n < 256)) {
+                  c = cp[i++];
+                  dst[n++] = ((c >= 'a') && (c <= 'z')) ? (unsigned char)(c - 32) : c;
+                }
+                if (dst[n - 1] != '\\') dst[n++] = '\\';
+              } else {
+                dst[n++] = '\\'; /* CDS stale -> resolve against the root */
+              }
+            }
           }
-          dst[k2] = 0;
+          for (; (sp[0] != 0) && (n < 260); sp++) {
+            c = sp[0];
+            dst[n++] = ((c >= 'a') && (c <= 'z')) ? (unsigned char)(c - 32) : c;
+          }
+          dst[n] = 0;
           r.w.ax = 0;
           r.w.flags &= ~INTR_CF;
           return;
