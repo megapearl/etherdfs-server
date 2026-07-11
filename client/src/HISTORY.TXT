@@ -2,6 +2,38 @@ EtherDFS changelog history
 
 --- Donald Flissinger fork ---
 
+v1.1.2 [2026-07-08] -- directory-creation fixes for DOS file managers:
+ - fix(client): 7160h TRUENAME CL=0 now canonicalizes a RELATIVE path to an
+   absolute one ("X:" + the drive's current directory from the CDS) instead of
+   returning it unchanged (uppercased). DOS Navigator OSP 6.4.0 (DPMI build)
+   expands the F7 "make directory" name through this call and aborted silently
+   when the result carried no drive letter, so F7 with a relative name did
+   nothing on an EtherDFS drive (no dir, no error, zero DOS calls). Already
+   drive-qualified and UNC paths keep the uppercase-as-is behavior that 4DOS's
+   mkfname relies on. Verified on real hardware, in the root and in subdirs.
+ - fix(client): a legacy AH=39h MkDir of a drive-qualified path on an EtherDFS
+   drive is rerouted to its LFN twin 7139h before DOSLFN sees it, so
+   "MD E:\DIR" (COMMAND.COM/batch/Borland RTL) no longer hangs in DOSLFN's
+   direct-sector VFAT write on our sectorless redirector drive. Verified:
+   drive-qualified and relative MD, and RD, all work.
+ - build: ships rebuilt static ethersrv binaries (the v1.1.1 lfn2sfn server
+   change had not been folded into the committed binaries).
+
+v1.1.1 [2026-07-06] -- relative-path LFN resolution + standard 8.3 aliases:
+ - client: resolve current-drive-relative and CWD-relative paths in every LFN
+   INT 21h handler (714Eh findfirst, 716Ch open/create, 7141h delete, 7156h
+   rename, 7139h mkdir, 713A/3Bh rmdir/chdir, 7143h attrs, 7160h truename)
+   instead of only claiming drive-qualified ("X:\") paths. Without this, once
+   our drive was the CURRENT DOS drive the shell/DOSLFN handed us drive-less
+   paths that we declined: VC showed short names in subdirectories and 7-Zip
+   could not open long-named files. New helpers lfn_claimdrv() and
+   lfn_server_path() centralize the resolution.
+ - server: lfn2sfn() follows the Win95/DOSLFN standard 8.3 algorithm: only a
+   lossy basis gets a "~N" numeric tail; names that already fit 8.3 keep their
+   plain form. Fixes alias inconsistency for multi-dot names ("a.b.c.gz" ->
+   "ABC~1.GZ") and matches what DOSLFN and Windows generate.
+ - deployment: load DOSLFN with "f-" (fallback-off) and etherdfs AFTER it.
+
 v1.1.0 [2026-07-05] -- first stable release with native Long File Name support:
  - Full Win95-style LFN on the mapped drive (client TSR hooking INT 21h/71xx +
    additive server wire-opcodes 0x40-0x4E): DIR shows real long names; open/

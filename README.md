@@ -264,6 +264,13 @@ out-run by a Gigabit host. Set `ETHERDFS_DELAY=5` (or higher).
 `ETHERDFS_DEBUG` is `0`. Verbose logging under heavy client traffic can stall
 the (single-threaded) server via log-driver backpressure.
 
+**Making a directory fails: DOS Navigator's F7 silently does nothing, or
+`MD X:\DIR` hangs** - both are client bugs fixed in v1.1.2: DN OSP expands the
+new name through LFN TRUENAME (7160h/CL=0), which older clients returned
+without a drive letter (DN then aborts before any DOS call), and a legacy
+`AH=39h` MkDir used to fall through to DOSLFN, which hangs trying direct
+sector I/O on the mapped drive. Update `ETHERDFS.EXE` to v1.1.2 or later.
+
 **Accented name shows as `_` or won't open** - set `ETHERDFS_CODEPAGE` to
 match your DOS box's active codepage (`437` or `850`).
 
