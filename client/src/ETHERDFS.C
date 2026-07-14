@@ -557,6 +557,11 @@ void process2f(void) {
           FAILFLAG(*ax);
           break;
         } else { /* success */
+          /* clamp the SERVER-supplied length to what we actually asked for: a
+           * malformed, oversized, or stale (seq-matched) reply must never write
+           * past the caller's read buffer. len can otherwise reach FRAMESIZE-60
+           * regardless of chunklen / the caller's CX. */
+          if (len > (unsigned short)chunklen) len = chunklen;
           copybytes(glob_sdaptr->curr_dta + totreadlen, answer, len);
           totreadlen += len;
           if ((len < chunklen) || (totreadlen == glob_intregs.x.cx)) { /* EOF - update SFT and break out */
@@ -615,7 +620,11 @@ void process2f(void) {
       struct sftstruct far *sftptr = MK_FP(glob_intregs.x.es, glob_intregs.x.di);
       ((unsigned short *)buff)[0] = glob_intregs.x.cx;
       ((unsigned short *)buff)[1] = sftptr->start_sector;
-      if (glob_intregs.h.bl > 1) FAILFLAG(2); /* BL should be either 0 (lock) or 1 (unlock) */
+      if (glob_intregs.h.bl > 1) { FAILFLAG(2); break; } /* BL should be either 0 (lock) or 1 (unlock) */
+      /* bound the caller-supplied region count (CX, 8 bytes each) BEFORE copying:
+       * sendquery's size check runs only AFTER this copy, so an over-large CX
+       * would already have overrun glob_pktdrv_sndbuff into adjacent globals. */
+      if (((unsigned long)glob_intregs.x.cx << 3) + 4 + 60 > sizeof(glob_pktdrv_sndbuff)) { FAILFLAG(2); break; }
       /* copy 8*CX bytes from DS:DX to buff+4 (parameters block) */
       copybytes(buff + 4, MK_FP(glob_intregs.x.ds, glob_intregs.x.dx), glob_intregs.x.cx << 3);
       if (sendquery(AL_LOCKFIL + glob_intregs.h.bl, glob_reqdrv, (glob_intregs.x.cx << 3) + 4, &answer, &ax, 0) != 0) {
@@ -890,8 +899,16 @@ void process2f(void) {
       }
       dta->par_clstr = ((unsigned short *)answer)[10];
       dta->dir_entry = ((unsigned short *)answer)[11];
-      /* then 32 bytes as in the found_file record */
-      copybytes(dta + 0x15, &(glob_sdaptr->found_file), 32);
+      /* then 32 bytes as in the found_file record, at DTA+0x15 BYTES. dta is a
+       * (packed, 21-byte) sdbstruct far*, so 'dta + 0x15' would be POINTER
+       * arithmetic = 0x15 * sizeof(sdbstruct) = 21*21 = 441 bytes past the DTA:
+       * a 32-byte wild write into the caller's memory on every classic 2Fh
+       * FindFirst/FindNext that returns a hit. Cast to a byte pointer so +0x15
+       * means 21 BYTES, as RBIL specifies. (This was the memory-layout-dependent
+       * hard hang when copying off the share with DN/4DOS: the copy issues a
+       * classic 8.3 FindFirst, unlike plain LFN browsing which stays on the
+       * bounded 714Eh path.) */
+      copybytes((unsigned char far *)dta + 0x15, &(glob_sdaptr->found_file), 32);
       }
       break;
     case AL_SKFMEND: /*** 21h: SKFMEND **************************************/

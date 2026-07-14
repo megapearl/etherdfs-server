@@ -2,6 +2,24 @@ EtherDFS changelog history
 
 --- Donald Flissinger fork ---
 
+v1.1.5 [2026-07-14] -- fix the classic-FindFirst wild write (THE copy hang):
+ - fix(client): the INT 2Fh redirector FindFirst/FindNext handler wrote the
+   32-byte found_file record 441 bytes past the caller's DTA instead of 21.
+   'dta' is a packed 'struct sdbstruct far *' (sizeof 21 = 0x15), so
+   'dta + 0x15' is POINTER arithmetic = 0x15 * 21 = 441 bytes, not the byte
+   offset 0x15 RBIL specifies. Every classic 8.3 FindFirst/FindNext that hit
+   the share scribbled 32 bytes deep into the caller's memory. Plain LFN
+   browsing stays on the bounded 714Eh path and was unaffected, but a DOS
+   Navigator F5 / 4DOS COPY off the share issues a classic FindFirst -> hard,
+   memory-layout-dependent hang (COMMAND.COM survived only because its DTA
+   sits in the throwaway PSP:0080h region). Fixed with the byte-pointer cast
+   the upstream code carries: (unsigned char far *)dta + 0x15.
+ - fix(client): READFIL now clamps the server-supplied reply length to the
+   requested chunk, so an oversized or stale (seq-matched) frame cannot write
+   past the caller's read buffer.
+ - fix(client): LOCKFIL bounds the caller's region count against the send
+   buffer BEFORE copying (sendquery's own size check ran too late).
+
 v1.1.4 [2026-07-14] -- harden the LFN layer against non-path operands:
  - fix(client): a central guard at the top of the 71xx dispatch now rejects
    operands that cannot be a DOS path (no NUL within 260 bytes, or embedded
