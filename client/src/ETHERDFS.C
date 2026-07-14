@@ -3380,6 +3380,18 @@ int main(int argc, char **argv) {
     cds->current_path[1] = ':';
     cds->current_path[2] = '\\';
     cds->current_path[3] = 0;
+    /* Initialise the REST of the CDS instead of leaving whatever DOS wrote into
+     * this slot at boot. Because CDSFLAG_PHY is set, DOS follows cds->dpb on
+     * its 'physical' code paths (IOCTL 44xx, AH=32h/AX=7302h Get DPB), and a
+     * stale far pointer there is a wild pointer. A real INT 2Fh/11xx redirector
+     * (SHSUCDX) parks these at FFFF:FFFF and RootOff=2; mirror that so any Get-
+     * DPB probe fails cleanly (-> DOSLFN & co. can never mistake our sectorless
+     * drive for a local FAT volume and issue raw sector I/O on it, the class
+     * behind the old MD hang). We never read these fields ourselves. */
+    cds->dpb = (unsigned char far *)0xFFFFFFFFlu;
+    cds->u.NET.redirifs_record_ptr = 0xFFFFFFFFlu;
+    cds->u.NET.parameter = 0;
+    cds->backslash_offset = 2;
   }
 
   if ((args.flags & ARGFL_QUIET) == 0) {

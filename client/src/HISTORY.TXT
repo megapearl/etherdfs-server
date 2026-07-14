@@ -2,6 +2,19 @@ EtherDFS changelog history
 
 --- Donald Flissinger fork ---
 
+v1.1.6 [2026-07-14] -- harden the CDS so our drive can never look local:
+ - fix(client): the install-time CDS setup now initialises the WHOLE CDS entry
+   (dpb, the NET union, backslash_offset) instead of leaving whatever DOS put
+   in that slot at boot. Because our drive carries CDSFLAG_PHY, DOS follows
+   cds->dpb on its physical code paths (IOCTL 44xx, AH=32h/AX=7302h Get DPB);
+   a stale pointer there is a wild pointer, and a Get-DPB that accidentally
+   succeeds lets DOSLFN treat our sectorless redirector drive as a local FAT
+   volume and do raw sector I/O on it (the class behind the old MD hang). We
+   now park dpb and the NET redir pointer at FFFF:FFFF and backslash_offset at
+   2, exactly as the SHSUCDX redirector does, so any Get-DPB probe fails
+   cleanly. Defensive: no active bug depended on it (v1.1.5 already copies
+   fine), but it closes a real latent hole. We never read these fields.
+
 v1.1.5 [2026-07-14] -- fix the classic-FindFirst wild write (THE copy hang):
  - fix(client): the INT 2Fh redirector FindFirst/FindNext handler wrote the
    32-byte found_file record 441 bytes past the caller's DTA instead of 21.
