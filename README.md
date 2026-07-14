@@ -279,6 +279,16 @@ touched another drive - NC loads `C:\APPS\NC\NCVIEW.MSG` immediately before
 asking for the true name of the file - the client declined the call, DOSLFN took
 it over and mangled it. Update `ETHERDFS.EXE` to v1.1.3 or later.
 
+**The machine hard-freezes when copying a file *off* a mapped drive with DOS
+Navigator (F5) or 4DOS `COPY`, but `COMMAND.COM COPY` works** - a client bug
+fixed in v1.1.5. The classic INT 2Fh FindFirst/FindNext handler wrote its found
+record 441 bytes past the caller's DTA instead of 21 (a byte-cast had been lost,
+so `dta + 0x15` scaled by the 21-byte struct size). Plain browsing uses the
+bounded LFN FindFirst and was unaffected, but a copy issues a classic 8.3
+FindFirst that tripped the stray write; the failure was memory-layout dependent,
+which is why it came and went as unrelated TSRs shifted memory around. Update
+`ETHERDFS.EXE` to v1.1.5 or later.
+
 **Accented name shows as `_` or won't open** - set `ETHERDFS_CODEPAGE` to
 match your DOS box's active codepage (`437` or `850`).
 
