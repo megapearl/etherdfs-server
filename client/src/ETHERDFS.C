@@ -1859,6 +1859,48 @@ void __interrupt __far inthandler21(union INTPACK r) {
       pop bx
       pop ax
     }
+    /* Malformed-operand guard (v1.1.4). The wire capture caught 71xx calls
+     * whose "path" register pointed at NON-PATH memory (a punctuation run with
+     * an embedded TAB -- some caller's delimiter table): DOS default-drive
+     * rules bind such a drive-less operand to OUR drive whenever it is
+     * current, and both ways of accepting it are harmful. CLAIMING it lets
+     * 7160h CL=0 copy hundreds of bytes of that garbage into the caller's
+     * buffer (and layout-dependent corruption is exactly the DN/4DOS copy-hang
+     * signature), while CHAINING it hands DOSLFN an operation on a drive it
+     * mis-classifies as local FAT (the proven MD-hang class). A real DOS path
+     * is NUL-terminated within 260 bytes and never contains control bytes, so
+     * anything else is answered here with "path not found". */
+    {
+      unsigned char far *pchk = NULL;
+      switch (r.h.al) {
+        case 0x39: case 0x3A: case 0x3B: case 0x41: case 0x43:
+        case 0x4E: case 0x56:
+          pchk = MK_FP(r.w.ds, r.w.dx);
+          break;
+        case 0x60: case 0x6C:
+          pchk = MK_FP(r.w.ds, r.w.si);
+          break;
+      }
+      if (pchk != NULL) {
+        unsigned short ci;
+        unsigned char bad = 1;
+        for (ci = 0; ci < 261; ci++) {
+          unsigned char cc = pchk[ci];
+          if (cc == 0) { bad = 0; break; }
+          if (cc < 0x20) break;           /* control byte: not a path */
+        }
+        if (bad) {
+          unsigned char gidx = LFN_PATHDRV(pchk);
+          if (gidx == 0xff) gidx = ((unsigned char far *)glob_sdaptr)[0x16];
+          if ((gidx <= 25) && (glob_data.ldrv[gidx] != 0xff)) {
+            r.w.ax = 0x0003;              /* path not found */
+            r.w.flags |= INTR_CF;
+            return;
+          }
+          /* another drive's problem: fall through and let its owner decide */
+        }
+      }
+    }
     if (r.h.al == 0xA0) { /* 71A0h GET VOLUME INFO -- advertise LFN locally */
       unsigned char far *rp = MK_FP(r.w.ds, r.w.dx); /* ASCIZ "X:\" */
       unsigned char idx = 0xff;
@@ -1969,7 +2011,10 @@ void __interrupt __far inthandler21(union INTPACK r) {
               }
             }
           }
-          for (; (sp[0] != 0) && (n < 260); sp++) {
+          for (; (sp[0] != 0) && (n < 259); sp++) { /* n<259 keeps the final
+                 * NUL at dst[259]: the 260-byte Win95 buffer runs 0..259, and
+                 * the CL=1/2 sibling caps the same way -- the old n<260 bound
+                 * put the NUL at dst[260], one byte past the buffer */
             c = sp[0];
             dst[n++] = ((c >= 'a') && (c <= 'z')) ? (unsigned char)(c - 32) : c;
           }
@@ -2512,7 +2557,7 @@ static struct cdsstruct far *getcds(unsigned int drive) {
     if (dir == (unsigned char far *) -1l) ok = 0;
   } /* end of static initialization */
   if (ok == 0) return(NULL);
-  if (drive > lastdrv) return(NULL);
+  if (drive >= lastdrv) return(NULL); /* lastdrv is a COUNT: valid 0..lastdrv-1 */
   /* return the CDS array entry for drive - note that currdir_size depends on
    * DOS version: 0x51 on DOS 3.x, and 0x58 on DOS 4+ */
   return((struct cdsstruct __far *)((unsigned char __far *)dir + (drive * 0x58 /*currdir_size*/)));

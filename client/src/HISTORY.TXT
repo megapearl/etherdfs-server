@@ -2,6 +2,29 @@ EtherDFS changelog history
 
 --- Donald Flissinger fork ---
 
+v1.1.4 [2026-07-14] -- harden the LFN layer against non-path operands:
+ - fix(client): a central guard at the top of the 71xx dispatch now rejects
+   operands that cannot be a DOS path (no NUL within 260 bytes, or embedded
+   control bytes) with "path not found" when they would bind to an EtherDFS
+   drive. Wire captures proved such calls happen in the wild (a caller's
+   delimiter table, TAB included, arrived as a 7141h/7143h "path" and left
+   as a garbage TRUENAME frame). Accepting them was harmful both ways:
+   claiming let 7160h CL=0 copy hundreds of garbage bytes into the caller's
+   buffer, chaining handed DOSLFN an operation it mis-runs as local FAT on a
+   sectorless drive (the class behind the old MD hang). Prime suspect for the
+   memory-layout-dependent hard hang when copying OFF the mapped drive with
+   DOS Navigator F5 or 4DOS COPY (COMMAND.COM COPY, which never enters the
+   LFN dispatch, always worked).
+ - fix(client): 7160h TRUENAME CL=0 could write its terminating NUL at byte
+   261 of the caller's 260-byte buffer (indices 0..259; the CL=1/2 sibling
+   already capped correctly). Off-by-one, now bounded to dst[259].
+ - fix(client): getcds() accepted a drive index one past LASTDRIVE (a COUNT,
+   so valid indices are 0..count-1). Latent, install/unload path only.
+ - hardening: resident stack grown from ~1.5K to ~3K (DATASEGSZ 4608 -> 6144;
+   +1.5K resident, typically UMB). Hardware IRQs nest on this stack while
+   sendquery busy-waits with interrupts enabled; the measured high-water left
+   ~660 bytes of margin, which is margin but not comfort.
+
 v1.1.3 [2026-07-14] -- relative LFN paths resolve against the right drive:
  - fix(client): a bare relative path ("file.txt") in an LFN INT 21h call is now
    always resolved against the DEFAULT drive (SDA 16h), and its current

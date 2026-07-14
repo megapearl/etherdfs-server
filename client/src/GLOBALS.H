@@ -32,7 +32,11 @@
  * DGROUP = 4064 (0xFE0), so 4608 covers it with margin and leaves ~1566 bytes
  * of resident stack (SP starts at DATASEGSZ-2, resident non-stack data ends
  * ~3040). RE-CHECK THE MAP after every globals change. */
-#define DATASEGSZ 4608
+/* v1.1.4: raised 4608 -> 6144. Hardware IRQs (NIC, timer) nest on this stack
+ * while sendquery busy-waits with interrupts enabled; the measured high-water
+ * of the 71xx path was ~660 bytes below the old ceiling, which is margin but
+ * not comfort. The extra 1.5K is cheap (UMB) and buys real headroom. */
+#define DATASEGSZ 6144
 
 /* a few globals useful only for debug messages */
 #if DEBUGLEVEL > 0
