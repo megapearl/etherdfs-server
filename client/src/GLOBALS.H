@@ -85,6 +85,16 @@ static unsigned short glob_reqstkword; /* WORD saved from the stack (used by SET
 static struct sdastruct far *glob_sdaptr; /* pointer to DOS SDA (set by main() at *
                                            * startup, used later by process2f()   */
 
+/* Base of the DOS CDS array (Current Directory Structure, one entry per drive)
+ * and the size of one entry, both taken from the List of Lists at install.
+ * The SDA's own drive_cdsptr is the CDS of the drive of the CURRENT DOS
+ * operation, so it goes STALE for our purposes: after an app touches C:, it
+ * still points at C: while the default drive is E:. Indexing this array by
+ * drive number always gives the RIGHT drive's CDS. */
+static unsigned char far *glob_cdsarr;  /* CDS[0] (0 = not available) */
+static unsigned char glob_cdssz;        /* bytes per CDS entry (51h or 58h) */
+static unsigned char glob_lastdrv;      /* LASTDRIVE (number of CDS entries) */
+
 /* seg:off addresses of the old (DOS) stack */
 static unsigned short glob_oldstack_seg;
 static unsigned short glob_oldstack_off;

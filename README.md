@@ -271,6 +271,14 @@ without a drive letter (DN then aborts before any DOS call), and a legacy
 `AH=39h` MkDir used to fall through to DOSLFN, which hangs trying direct
 sector I/O on the mapped drive. Update `ETHERDFS.EXE` to v1.1.2 or later.
 
+**Norton Commander's F3 viewer says "file not found" for every file on the
+mapped drive (F4 works)** - a client bug fixed in v1.1.3. The client used to
+resolve a bare relative filename against the CDS of the drive of the *current
+DOS operation* instead of the default drive. Once an application had just
+touched another drive - NC loads `C:\APPS\NC\NCVIEW.MSG` immediately before
+asking for the true name of the file - the client declined the call, DOSLFN took
+it over and mangled it. Update `ETHERDFS.EXE` to v1.1.3 or later.
+
 **Accented name shows as `_` or won't open** - set `ETHERDFS_CODEPAGE` to
 match your DOS box's active codepage (`437` or `850`).
 

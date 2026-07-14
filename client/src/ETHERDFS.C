@@ -166,6 +166,21 @@ void __declspec(naked) far pktdrv_recv(void) {
 /* translates a drive letter (either upper- or lower-case) into a number (A=0,
  * B=1, C=2, etc) */
 #define DRIVETONUM(x) (((x) >= 'a') && ((x) <= 'z')?x-'a':x-'A')
+
+/* The CDS of a SPECIFIC drive, from the CDS array we grabbed out of the List of
+ * Lists at install. Use this -- never glob_sdaptr->drive_cdsptr -- whenever the
+ * drive is chosen by US (a relative LFN path resolving against the default
+ * drive). drive_cdsptr belongs to the CURRENT DOS OPERATION and is stale in that
+ * context: e.g. Norton Commander's F3 opens C:\APPS\NC\NCVIEW.MSG and only then
+ * asks for the true name of the bare relative "viewtest.txt". drive_cdsptr then
+ * still points at C: while the default drive is E:, so we used to decline the
+ * call, DOSLFN took it over, mangled it, and NC reported "file not found".
+ * Returns NULL if the CDS array is unavailable or the drive is out of range. */
+static struct cdsstruct far *cds_for_drive(unsigned char drv) {
+  if ((glob_cdsarr == 0) || (drv >= glob_lastdrv)) return NULL;
+  return (struct cdsstruct far *)(glob_cdsarr +
+                                  ((unsigned short)drv * glob_cdssz));
+}
 /* Target drive index for an LFN INT 21h path. Use the "X:" prefix if present,
  * otherwise the path is relative to the CURRENT default drive, which DOS keeps
  * at SDA offset 16h. Without this, when our drive is the current drive the
@@ -1250,13 +1265,14 @@ static void lfn_fill_finddata(unsigned char far *fd, unsigned char *r, unsigned 
 static unsigned char lfn_claimdrv(unsigned char far *p) {
   unsigned char idx = LFN_PATHDRV(p);
   if (idx == 0xff) {
-    unsigned char cd = ((unsigned char far *)glob_sdaptr)[0x16];
-    struct cdsstruct far *cds =
-        (struct cdsstruct far *)glob_sdaptr->drive_cdsptr;
-    unsigned char far *cp = cds->current_path;
-    if ((cp[0] != 0) && (cp[1] == ':') &&
-        ((unsigned char)DRIVETONUM(cp[0]) == cd))
-      idx = cd;
+    /* A bare relative name belongs to the DEFAULT drive, full stop (SDA 16h).
+     * We used to additionally demand that glob_sdaptr->drive_cdsptr point at
+     * that same drive, and declined the call when it did not -- but that
+     * pointer tracks the CURRENT DOS OPERATION, so any preceding access to
+     * another drive made us decline and hand the call to DOSLFN, which mangles
+     * it for our PHYSICAL-flagged drive. The CWD now comes from the drive's own
+     * CDS (cds_for_drive), so no such guard is needed. */
+    idx = ((unsigned char far *)glob_sdaptr)[0x16];
   }
   return idx;
 }
@@ -1271,10 +1287,9 @@ static unsigned short lfn_server_path(unsigned char *dst, unsigned char far *p,
   unsigned short n = 0, i;
   if ((p[0] != 0) && (p[1] == ':')) p = p + 2;
   if ((p[0] != '\\') && (p[0] != '/')) {
-    struct cdsstruct far *cds =
-        (struct cdsstruct far *)glob_sdaptr->drive_cdsptr;
-    unsigned char far *cp = cds->current_path;
-    if ((cp[0] != 0) && (cp[1] == ':') &&
+    struct cdsstruct far *cds = cds_for_drive(drv);
+    unsigned char far *cp = (cds != NULL) ? cds->current_path : NULL;
+    if ((cp != NULL) && (cp[0] != 0) && (cp[1] == ':') &&
         ((unsigned char)DRIVETONUM(cp[0]) == drv)) {
       i = 2;
       while ((cp[i] != 0) && (n < 250)) { dst[n] = cp[i]; n++; i++; }
@@ -1675,6 +1690,7 @@ static void lfn_passdown(unsigned short pax, unsigned short pbx,
  * previous handler. The AH==71h branch is reserved for a future increment that
  * will advertise LFN (71A0h) and service FindFirst/Next/Open/Create for our
  * drives so DOSLFN no longer needs to (and stops mangling) those drives. */
+
 void __interrupt __far inthandler21(union INTPACK r) {
   _asm {
     jmp SKIPTSRSIG21
@@ -1938,10 +1954,9 @@ void __interrupt __far inthandler21(union INTPACK r) {
             dst[1] = ':';
             n = 2;
             if ((pp[0] != '\\') && (pp[0] != '/')) { /* truly relative: add cwd */
-              struct cdsstruct far *cds =
-                  (struct cdsstruct far *)glob_sdaptr->drive_cdsptr;
-              unsigned char far *cp = cds->current_path;
-              if ((cp[0] != 0) && (cp[1] == ':') &&
+              struct cdsstruct far *cds = cds_for_drive(idx);
+              unsigned char far *cp = (cds != NULL) ? cds->current_path : NULL;
+              if ((cp != NULL) && (cp[0] != 0) && (cp[1] == ':') &&
                   ((unsigned char)DRIVETONUM(cp[0]) == idx)) {
                 unsigned short i = 2; /* skip the CDS path's own "X:" */
                 while ((cp[i] != 0) && (n < 256)) {
@@ -3227,6 +3242,37 @@ int main(int argc, char **argv) {
 
   /* remember the SDA address (will be useful later) */
   glob_sdaptr = getsda();
+
+  /* Grab the CDS array out of the DOS List of Lists (INT 21h/AH=52h -> ES:BX):
+   *   [BX+16h] DWORD -> CDS array,  [BX+21h] BYTE  LASTDRIVE
+   * One entry is 51h bytes on DOS 3.x and 58h on DOS 4.0+. We need this because
+   * the SDA's drive_cdsptr is the CDS of the current DOS *operation*, which is
+   * the wrong drive whenever an app touched another drive just before handing us
+   * a relative path (see cds_for_drive). */
+  {
+    unsigned short lolseg = 0, loloff = 0, dosver = 0;
+    _asm {
+      mov ah, 52h
+      push es
+      push bx
+      int 21h
+      mov cx, es
+      mov dx, bx
+      pop bx
+      pop es
+      mov lolseg, cx
+      mov loloff, dx
+      mov ah, 30h
+      int 21h
+      mov dosver, ax
+    }
+    if (lolseg != 0) {
+      unsigned char far *lol = MK_FP(lolseg, loloff);
+      glob_cdsarr = *(unsigned char far * far *)(lol + 0x16);
+      glob_lastdrv = lol[0x21];
+      glob_cdssz = ((dosver & 0xff) >= 4) ? 0x58 : 0x51;
+    }
+  }
 
   /* init the packet driver interface */
   glob_data.pktint = 0;

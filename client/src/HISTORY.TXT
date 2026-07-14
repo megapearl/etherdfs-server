@@ -2,6 +2,22 @@ EtherDFS changelog history
 
 --- Donald Flissinger fork ---
 
+v1.1.3 [2026-07-14] -- relative LFN paths resolve against the right drive:
+ - fix(client): a bare relative path ("file.txt") in an LFN INT 21h call is now
+   always resolved against the DEFAULT drive (SDA 16h), and its current
+   directory is read from that drive's OWN CDS, taken from the DOS List of
+   Lists at install. The client used to derive the CWD from the SDA's
+   drive_cdsptr, which is the CDS of the drive of the CURRENT DOS OPERATION:
+   after an application touched another drive it pointed at THAT drive, the
+   "is this CDS really mine?" guard failed, and the client declined the call --
+   handing it to DOSLFN, which mangles it for our PHYSICAL-flagged redirector.
+   Symptom: Norton Commander's F3 viewer reported "file not found" for every
+   file on the mapped drive (it opens C:\APPS\NC\NCVIEW.MSG and only THEN asks
+   for the true name of the bare relative filename -- so drive_cdsptr pointed at
+   C: while the default drive was ours). F4 worked because it passed a qualified
+   path. Verified on real hardware: F3 now views files on the mapped drive.
+   This affects every LFN handler that takes a relative path, not just truename.
+
 v1.1.2 [2026-07-08] -- directory-creation fixes for DOS file managers:
  - fix(client): 7160h TRUENAME CL=0 now canonicalizes a RELATIVE path to an
    absolute one ("X:" + the drive's current directory from the CDS) instead of
