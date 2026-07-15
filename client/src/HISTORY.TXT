@@ -2,6 +2,34 @@ EtherDFS changelog history
 
 --- Donald Flissinger fork ---
 
+v1.1.7 [2026-07-15] -- survive a stopped clock in the reply-wait + nesting guard:
+ - fix(client): the sendquery() reply-wait no longer depends on interrupts
+   staying enabled. Its retry timeout is driven by the BIOS tick at 0x46C,
+   which only advances on timer IRQs; under Win98 EMM386 + a DPMI host that
+   reflects interrupts (DOS Navigator's Borland RTM/DPMI16BI), the virtual
+   interrupt flag was observed to end up stuck CLEARED inside this wait, which
+   froze BOTH the tick and the packet-driver RX path -- so the tick-based
+   timeout never fired and the loop spun forever (the DN copy / Alt-X freeze
+   under EMM386; reproduced 1:1 in QEMU with a real Win98 image, never on
+   FreeDOS+JEMM386). Two defenses: (1) re-assert STI every iteration to revive
+   the tick and RX; (2) a backstop counter that depletes ONLY while the tick
+   is genuinely frozen (refilled on every tick movement), so a normal
+   multi-tick wait for a slow reply can never trip it -- a truly stopped clock
+   now breaks out as a timeout instead of hanging.
+ - fix(client): the 2Fh and 21h-LFN handlers share one resident stack. The
+   "am I nested?" test used SS==DS alone, which misses a request that arrives
+   on a DPMI host's reflection stack (foreign SS) while an outer request is
+   blocked in sendquery. A new glob_swapped flag, test-and-set under CLI by
+   whoever owns the resident stack, is the authoritative guard; a nested
+   request now bails (AX=5) instead of resetting SP over the outer's live
+   frames. The register copy-back happens before the release so glob_intregs
+   cannot be clobbered mid-readout.
+ - Validated in QEMU (real Win98 DOS 7.10 + Win98 EMM386 NOEMS + 4DOS + DOSLFN
+   + etherdfs): the real-mode DN build now copies all 609 long-named files E:
+   -> C: cleanly with the clock still ticking. The DPMI DN build exposes a
+   further corruption in the DPMI host's reflection path that is still under
+   investigation; this release removes the spin-forever failure mode it sat on.
+
 v1.1.6 [2026-07-14] -- harden the CDS so our drive can never look local:
  - fix(client): the install-time CDS setup now initialises the WHOLE CDS entry
    (dpb, the NET union, backslash_offset) instead of leaving whatever DOS put

@@ -308,6 +308,7 @@ static unsigned short sendquery(unsigned char query, unsigned char drive, unsign
   static unsigned char seq;
   unsigned short count;
   unsigned char t;
+  unsigned long spinbudget;
   unsigned char volatile far *rtc = (unsigned char far *)0x46C; /* this points to a char, while the rtc timer is a word - but I care only about the lowest 8 bits. Be warned that this location won't increment while interrupts are disabled! */
 
   /* resolve remote drive - no need to validate it, it has been validated
@@ -370,9 +371,28 @@ static unsigned short sendquery(unsigned char query, unsigned char drive, unsign
 
     /* wait for (and validate) the answer frame */
     t = *rtc;
+    spinbudget = 30000000UL;
     for (;;) {
       int i;
+      /* This polling context is OURS and must run with interrupts enabled:
+       * the answer arrives via the packet driver's IRQ, and the 0x46C timeout
+       * tick above only advances on timer IRQs. Under EMM386 + a DPMI host's
+       * interrupt reflection (DN's RTM/DPMI16BI) the virtual IF has been
+       * observed to end up stuck CLEARED here, which freezes BOTH the tick and
+       * the RX path -- and since the retry timeout below is tick-based, the
+       * loop then spun forever (the DN copy/Alt-X freeze under EMM386). Two
+       * defenses: (1) re-assert STI every iteration to revive tick+RX; (2) a
+       * backstop counter that only depletes while the tick is truly frozen
+       * (it is refilled on every tick movement), so a normal multi-tick wait
+       * for a slow reply can NEVER trip it -- only a genuinely stopped clock
+       * does, and then we break out as a timeout instead of hanging. */
+      _asm { sti }
       if ((t != *rtc) && (t+1 != *rtc) && (*rtc != 0)) break; /* timeout, retry */
+      if (*rtc == t) {                  /* tick not advancing right now */
+        if (--spinbudget == 0) break;   /* clock truly stopped -> bail out */
+      } else {
+        spinbudget = 30000000UL;        /* time is flowing: refill the backstop */
+      }
       if (glob_pktdrv_recvbufflen < 1) continue;
       /* I've got something! */
       /* is the frame long enough for me to care? */
@@ -1123,6 +1143,26 @@ void __interrupt __far inthandler(union INTPACK r) {
     }
   }
 
+  /* Take the resident stack. SS==DS was already rejected above, but a nested
+   * request can ALSO arrive on a DPMI host's reflection stack (foreign SS)
+   * while an outer request is blocked in sendquery: test-and-set glob_swapped
+   * under CLI and fail such calls instead of resetting SP over the outer's
+   * live frames. glob_intregs is shared state too, so this guard sits BEFORE
+   * the register copy below. */
+  { volatile unsigned char _swapbusy = 0;
+    _asm {
+      cli
+      cmp byte ptr glob_swapped, 0
+      je swp2ftake
+      mov byte ptr _swapbusy, 1
+      jmp swp2fdone
+    swp2ftake:
+      mov byte ptr glob_swapped, 1
+    swp2fdone:
+      sti
+    }
+    if (_swapbusy != 0) { r.w.ax = 0x0005; r.w.flags |= INTR_CF; return; }
+  }
   /* copy interrupt registers into glob_intregs so the int handler can access them without using any stack */
   copybytes(&glob_intregs, &r, sizeof(union INTPACK));
   /* set stack to my custom memory */
@@ -1146,8 +1186,11 @@ void __interrupt __far inthandler(union INTPACK r) {
     mov SP, glob_oldstack_off
     sti
   }
-  /* copy all registers back so watcom will set them as required 'for real' */
+  /* copy all registers back so watcom will set them as required 'for real'.
+   * This runs BEFORE the glob_swapped release so a nested request cannot
+   * clobber glob_intregs while it is still being read out. */
   copybytes(&r, &glob_intregs, sizeof(union INTPACK));
+  glob_swapped = 0;
   return;
 
   /* hand control to the previous INT 2F handler */
@@ -2225,19 +2268,31 @@ void __interrupt __far inthandler21(union INTPACK r) {
       /* other BL subfunctions -> chain */
     }
     if (do_lfn) { /* guarded blocking server round-trip on the resident stack */
-      /* Stateless nesting guard: if SS is already DS we are nested inside an
-       * outer switched context (a 2Fh or 21h send blocked in sendquery); a
-       * second switch would clobber it, so bail without touching the stack. */
+      /* Nesting guard. SS==DS catches a caller already ON the resident stack,
+       * but that alone is not enough: a DPMI host (RTM/DPMI16BI) reflects
+       * interrupts to real mode on its OWN stack, so a request issued from an
+       * IRQ while an outer request is blocked in sendquery arrives with a
+       * foreign SS. glob_swapped is the authoritative "resident stack in use"
+       * flag: test-and-set it atomically (CLI) and bail when it is taken -- a
+       * second SP=DATASEGSZ-2 switch would destroy the outer's live frames
+       * (the DN-under-EMM386 copy/Alt-X freeze). */
       { volatile unsigned char _nested = 0;
         _asm {
           push ax
           push bx
+          cli
           mov ax, ss
           mov bx, ds
           cmp ax, bx
-          jne n21ok
+          je n21busy
+          cmp byte ptr glob_swapped, 0
+          jne n21busy
+          mov byte ptr glob_swapped, 1
+          jmp n21ok
+        n21busy:
           mov byte ptr _nested, 1
         n21ok:
+          sti
           pop bx
           pop ax
         }
@@ -2266,6 +2321,18 @@ void __interrupt __far inthandler21(union INTPACK r) {
         mov SP, glob_o21sp
         sti
       }
+      if ((glob_lfn_op != LFNOP_PDPREP) && (glob_lfn_op != AL_LFN_OPEN)) {
+        /* no pass-down follows: copy the results back BEFORE releasing the
+         * resident stack, so a nested request cannot clobber glob_intregs
+         * between the swap-back and this copy */
+        copybytes(&r, &glob_intregs, sizeof(union INTPACK));
+        glob_swapped = 0;
+        return;
+      }
+      /* a classic pass-down follows, on the CALLER's stack; it re-enters our
+       * own 2Fh handler (the nested open/attr op on this drive), so the
+       * resident stack must be released first */
+      glob_swapped = 0;
       if (glob_lfn_op == LFNOP_PDPREP) {
         /* phase 2 of del/rd/cd/attr: classic pass-down of the alias path, on
          * the CALLER's stack (the nested 2Fh op must not see SS==DS) */
@@ -2287,10 +2354,6 @@ void __interrupt __far inthandler21(union INTPACK r) {
             r.w.cx = glob_lfn_pdcx; /* attributes from the classic get */
           r.w.flags &= ~INTR_CF;
         }
-        return;
-      }
-      if (glob_lfn_op != AL_LFN_OPEN) {
-        copybytes(&r, &glob_intregs, sizeof(union INTPACK));
         return;
       }
       /* 716Ch part 2: the pass-down, on the CALLER's stack (a nested 2Fh open

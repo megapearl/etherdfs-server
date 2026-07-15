@@ -103,6 +103,20 @@ static unsigned char glob_lastdrv;      /* LASTDRIVE (number of CDS entries) */
 static unsigned short glob_oldstack_seg;
 static unsigned short glob_oldstack_off;
 
+/* v1.1.7: the resident stack (top = DATASEGSZ-2) is shared by the 2Fh and the
+ * 21h-LFN handlers. "Am I nested?" used to be inferred from SS==DS alone, but
+ * that misses callers arriving on a THIRD stack: a DPMI host (e.g. Borland
+ * RTM/DPMI16BI, the DOS Navigator runtime) reflects interrupts to real mode on
+ * its OWN stack, so a request issued from an IRQ handler while an outer
+ * request is blocked in sendquery arrives with SS != DS and passed the old
+ * guard. The second switch then reset SP to the shared top and destroyed the
+ * outer's live frames (observed as the DN copy/Alt-X freeze under EMM386).
+ * This flag is the authoritative "resident stack in use" marker: test-and-set
+ * under CLI by whoever swaps, cleared after the swap-back (and after the
+ * glob_intregs copy-back, which closes that race as well). Our handlers always
+ * return -- there is no abort path that could leave it stuck. */
+static volatile unsigned char glob_swapped = 0;
+
 /* the INT 2F "multiplex id" registerd by EtherDFS */
 static unsigned char glob_multiplexid;
 
