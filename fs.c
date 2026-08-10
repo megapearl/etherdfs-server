@@ -19,6 +19,7 @@
 #include <sys/types.h>
 #include <time.h> /* time_t, struct tm... */
 #include <unistd.h>
+#include <utime.h> /* utime() */
 
 #include "debug.h"
 #include "fs.h" /* include self for control */
@@ -411,6 +412,35 @@ static unsigned long time2dos(time_t t) {
   return (res);
 }
 
+/* inverse of time2dos(): unpacks a DOS-packed date+time (as sent by the
+ * client's SFT at CLSFIL) into a time_t, interpreting the fields as LOCAL
+ * wall-clock (matching time2dos()'s use of localtime()). Returns (time_t)-1
+ * if the fields are not a representable calendar date/time - real archives
+ * do contain garbage timestamps (month 0, day 0, ...) and mktime() alone
+ * will not reliably flag those, so the fields are range-checked first. */
+static time_t dos2unixtime(unsigned long dostime) {
+  struct tm t;
+  int sec2, min, hour, day, mon, year;
+  sec2 = dostime & 0x1f;
+  min = (dostime >> 5) & 0x3f;
+  hour = (dostime >> 11) & 0x1f;
+  day = (dostime >> 16) & 0x1f;
+  mon = (dostime >> 21) & 0x0f;
+  year = (dostime >> 25) & 0x7f;
+  if (mon < 1 || mon > 12 || day < 1 || day > 31 || hour > 23 || min > 59 ||
+      sec2 > 29)
+    return ((time_t)-1);
+  memset(&t, 0, sizeof(t));
+  t.tm_year = year + 80; /* FAT years are since 1980, tm_year since 1900 */
+  t.tm_mon = mon - 1;    /* FAT months are 1..12, tm_mon is 0..11 */
+  t.tm_mday = day;
+  t.tm_hour = hour;
+  t.tm_min = min;
+  t.tm_sec = sec2 << 1;
+  t.tm_isdst = -1; /* let mktime() figure out DST for this local date */
+  return (mktime(&t));
+}
+
 /* converts a time_t into a Windows FILETIME (number of 100-nanosecond intervals
  * since 1601-01-01 00:00 UTC). The Unix epoch (1970-01-01) is 11644473600
  * seconds after the FILETIME epoch. Used by the LFN FindFirst/Next replies so
@@ -567,6 +597,23 @@ int setitemattr(char *i, unsigned char fattr) {
    */
   return (0);
 #endif
+}
+
+/* set mtime (and atime, utime() sets both together) on file i from a
+ * DOS-packed date+time. returns 0 on success, non-zero otherwise (including
+ * an unrepresentable dostime, e.g. the garbage dates real DOS BACKUP/COPY
+ * runs sometimes wrote - the caller treats that as "leave mtime as-is",
+ * matching dos5_restore.py's handling of the same fields on the CONTROL.###
+ * side). Works on any filesystem (unlike setitemattr(), this isn't a FAT
+ * ioctl), which matters since the destination is usually ext4/ZFS, not FAT. */
+int setitemtime(char *i, unsigned long dostime) {
+  struct utimbuf ut;
+  time_t t = dos2unixtime(dostime);
+  if (t == (time_t)-1)
+    return (-1);
+  ut.actime = t;
+  ut.modtime = t;
+  return (utime(i, &ut));
 }
 
 /* directory entry used for deterministic SFN (~N) assignment, shared between

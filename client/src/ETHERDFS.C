@@ -530,12 +530,21 @@ void process2f(void) {
       /* my only job is to decrement the SFT's handle count (which I didn't
        * have to increment during OPENFILE since DOS does it... talk about
        * consistency. I also inform the server about this, just so it knows */
-      /* ES:DI points to the SFT */
+      /* ES:DI points to the SFT. Also pass along file_time and dev_info_word
+       * (aka the SFT flags word - offset 5, same field OPENFILE seeds with
+       * SFT_FSHARED|SFT_FCLEAN): DOS's INT21h/5701h (SetFtime, used by COPY,
+       * BACKUP, Dos Navigator/Volkov/Norton Commander when they preserve
+       * timestamps) writes straight into these SFT fields and sets the
+       * SFT_FDATE bit (0x4000); it never calls back into the redirector.
+       * Close is therefore the only point where the file's real timestamp
+       * can be recovered and sent to the server - see ethersrv.c AL_CLSFIL. */
       {
       struct sftstruct far *sftptr = MK_FP(glob_intregs.x.es, glob_intregs.x.di);
       if (sftptr->handle_count > 0) sftptr->handle_count--;
-      ((unsigned short *)buff)[0] = sftptr->start_sector;
-      if (sendquery(AL_CLSFIL, glob_reqdrv, 2, &answer, &ax, 0) == 0) {
+      ((unsigned long *)buff)[0] = sftptr->file_time;     /* bytes 0-3 */
+      ((unsigned short *)buff)[2] = sftptr->start_sector; /* bytes 4-5: fileid */
+      ((unsigned short *)buff)[3] = sftptr->dev_info_word; /* bytes 6-7: SFT flags */
+      if (sendquery(AL_CLSFIL, glob_reqdrv, 8, &answer, &ax, 0) == 0) {
         if (*ax != 0) FAILFLAG(*ax);
       }
       }

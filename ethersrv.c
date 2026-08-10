@@ -665,10 +665,34 @@ static int process(struct struct_answcache *answer, unsigned char *reqbuff,
       *ax = 3;
     }
   } else if (query == AL_CLSFIL) { /* AL_CLSFIL (0x06) */
-    /* I do nothing, since I do not keep any open files around anyway.
-     * just say 'ok' by sending back AX=0 */
+    /* I do not keep any open files around, so there is nothing to flush.
+     * just say 'ok' by sending back AX=0. As of the wire extension below,
+     * I also restore the file's original mtime here, since close is the
+     * only point at which DOS commits SFT changes (DosSetFtime/INT 21h
+     * 5701h writes straight into the SFT and sets SFT_FDATE; it never
+     * calls back into the redirector) - see fs.c:setitemtime().
+     * reqbufflen==2: old client, fileid only, nothing more to do.
+     * reqbufflen>=8: DOS-packed dostime (long, bytes 0-3) + fileid (word,
+     * bytes 4-5) + sft_flags/dev_info_word (word, bytes 6-7) - same
+     * long-then-words layout AL_READFIL/AL_WRITEFIL use for offset+fileid. */
     DBG("CLOSE FILE\n");
     *ax = 0;
+    if (reqbufflen >= 8) {
+      uint32_t dostime = le32toh(((uint32_t *)reqbuff)[0]);
+      uint16_t fileid = le16toh(wreqbuff[2]);
+      uint16_t sft_flags = le16toh(wreqbuff[3]);
+      char *fname = sstoitem(fileid);
+      DBG("  fileid=%u dostime=0x%08X sft_flags=0x%04X path='%s'\n",
+          fileid, dostime, sft_flags, fname ? fname : "(unknown)");
+      /* SFT_FDATE (0x4000): DOS only set sft_date/sft_time if something
+       * actually wrote to the file (or a program called INT 21h/5701h
+       * explicitly). Skip the utime() call otherwise, e.g. a file opened
+       * read-only should not have its timestamp touched. */
+      if ((sft_flags & 0x4000) && fname != NULL && !readonly_mode) {
+        if (setitemtime(fname, dostime) != 0)
+          DBG("  setitemtime() failed: %s\n", strerror(errno));
+      }
+    }
   } else if ((query == AL_SETATTR) &&
              (reqbufflen > 1)) { /* AL_SETATTR (0x0E) */
     if (readonly_mode) {

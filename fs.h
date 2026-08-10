@@ -50,6 +50,12 @@ unsigned char getitemattr(char *i, struct fileprops *fprops,
 /* set attributes fattr on file i. returns 0 on success, non-zero otherwise. */
 int setitemattr(char *i, unsigned char fattr);
 
+/* set mtime (and atime) on file i from a DOS-packed date+time (same encoding
+ * as fileprops.ftime). returns 0 on success, non-zero otherwise. Used on
+ * CLSFIL so a file written over the wire keeps the source's original
+ * timestamp instead of the time the copy happened. */
+int setitemtime(char *i, unsigned long dostime);
+
 /* searches for file matching template tmpl in directory dss (dss is the
  * starting sector of the directory, as obtained via getitemss) with attribute
  * attr, fills 'out' with the nth match. returns 0 on success, non-zero
