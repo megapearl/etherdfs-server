@@ -289,6 +289,13 @@ FindFirst that tripped the stray write; the failure was memory-layout dependent,
 which is why it came and went as unrelated TSRs shifted memory around. Update
 `ETHERDFS.EXE` to v1.1.5 or later.
 
+**Files copied to the mapped drive get today's date instead of their
+original one** - fixed in two steps. `COPY`, Volkov Commander and DOS Navigator
+set the date with INT 21h/5701h on the open file; that needs client *and*
+server v1.1.8 or later, because the date only reaches the server on close.
+Norton Commander 5.5x sets it by path instead (LFN 7143h, BL=03h) after closing
+the file; that needs client v1.1.9 or later (no server change).
+
 **Accented name shows as `_` or won't open** - set `ETHERDFS_CODEPAGE` to
 match your DOS box's active codepage (`437` or `850`).
 

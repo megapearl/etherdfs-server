@@ -165,6 +165,8 @@ static unsigned short glob_lfn_pdax;         /* pass-down result AX */
 static unsigned short glob_lfn_pdfl;         /* pass-down result FLAGS */
 static unsigned short glob_lfn_pdcx;         /* pass-down result CX (43h get) */
 static unsigned short glob_lfn_pdop;         /* pass-down AX op for LFNOP_PDPREP */
+static unsigned short glob_lfn_pdhnd;        /* 7143h BL=3: transient handle */
+static unsigned short glob_lfn_pderr;        /* 7143h BL=3: deferred DOS error */
 static unsigned char glob_lfn_sub;           /* 7160h CL subfunction (1|2) */
 static unsigned short glob_o21ss;         /* saved SS for the 21h-hook stack swap */
 static unsigned short glob_o21sp;         /* saved SP for the 21h-hook stack swap */

@@ -2,6 +2,31 @@ EtherDFS changelog history
 
 --- Donald Flissinger fork ---
 
+v1.1.9 [2026-09-25] -- keep file dates when Norton Commander copies to us:
+ - fix(client): Norton Commander 5.5x does not preserve a copied file's date
+   with INT 21h/5701h on its open handle. Once the file is closed it calls
+   7143h by path three times, BL=07h (creation), BL=03h (last write) and
+   BL=05h (last access). The client chained every 7143h BL>=2 to DOS, which
+   does not support it, so each file NC copied to our drive kept the time of
+   the copy. COPY, Volkov Commander and Dos Navigator were fine, because they
+   use 5701h. 7143h BL=03h is now serviced for our drives the same way DOSLFN's
+   own fallback mode does it: resolve the long path to its alias, open it
+   read-only, 5701h on that handle, close. The close carries the time to the
+   server through the v1.1.8 CLSFIL extension, so the server needs no change.
+   BL=05h/07h still chain, since DOS cannot see last-access or creation times
+   on our drive, and NC ignores their result.
+ - Validated in QEMU (Win98 DOS 7.10 + Win98 EMM386 NOEMS + 4DOS + DOSLFN f-
+   + NC 5.5): the same 47-file floppy set copied with NC kept today's time
+   with v1.1.8 and all 47 original 1989-1993 dates with v1.1.9. Subdirectory
+   copies and COPY (5701h) behave as before.
+
+v1.1.8 [2026-08-10] -- preserve the source file's timestamp on close:
+ - fix(client+server): 5701h only writes the new date/time into the SFT and
+   sets SFT_FDATE; DOS never calls the redirector for it. CLSFIL now also
+   carries the SFT file_time and flags word (8 bytes, up from 2), and the
+   server applies the time with utime() when SFT_FDATE is set. Old clients and
+   servers interoperate unchanged (PROTOVER stays 2).
+
 v1.1.7 [2026-07-15] -- survive a stopped clock in the reply-wait + nesting guard:
  - fix(client): the sendquery() reply-wait no longer depends on interrupts
    staying enabled. Its retry timeout is driven by the BIOS tick at 0x46C,

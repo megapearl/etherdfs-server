@@ -533,8 +533,9 @@ void process2f(void) {
       /* ES:DI points to the SFT. Also pass along file_time and dev_info_word
        * (aka the SFT flags word - offset 5, same field OPENFILE seeds with
        * SFT_FSHARED|SFT_FCLEAN): DOS's INT21h/5701h (SetFtime, used by COPY,
-       * BACKUP, Dos Navigator/Volkov/Norton Commander when they preserve
-       * timestamps) writes straight into these SFT fields and sets the
+       * BACKUP, Dos Navigator and Volkov Commander when they preserve
+       * timestamps; Norton Commander 5.5x gets here through our 7143h BL=3
+       * emulation) writes straight into these SFT fields and sets the
        * SFT_FDATE bit (0x4000); it never calls back into the redirector.
        * Close is therefore the only point where the file's real timestamp
        * can be recovered and sent to the server - see ethersrv.c AL_CLSFIL. */
@@ -2154,7 +2155,8 @@ void __interrupt __far inthandler21(union INTPACK r) {
         do_lfn = 1;
       }
     } else if (r.h.al == 0x43) { /* 7143h get/set attributes by path */
-      if (r.h.bl <= 1) { /* BL=0 get (out CX) / BL=1 set (in CX) */
+      if ((r.h.bl <= 1) || (r.h.bl == 3)) { /* BL=0 get (out CX) / BL=1 set
+                    (in CX) / BL=3 set last-write date DI + time CX */
         unsigned char far *pp = MK_FP(r.w.ds, r.w.dx);
         unsigned char idx = 0xff;
         idx = lfn_claimdrv(pp);
@@ -2166,7 +2168,11 @@ void __interrupt __far inthandler21(union INTPACK r) {
           do_lfn = 1;
         }
       }
-      /* BL>=2 (file times by path) -> chain; 4DOS TOUCH uses handle-based
+      /* BL=3 matters: Norton Commander 5.5x stamps every copied file with
+       * 7143h BL=7/3/5 by path instead of 5701h on its open handle, so
+       * without it NC copies to our drive got the copy time. BL=2 and BL>=4
+       * -> chain: last-access date (5) and creation time (7) have no home
+       * that DOS can see on our drive, and 4DOS TOUCH uses handle-based
        * 5705h/5707h instead, which ride the open-handle path */
     } else if (r.h.al == 0x56) { /* 7156h rename (long target preserved) */
       unsigned char far *po = MK_FP(r.w.ds, r.w.dx);
@@ -2349,6 +2355,39 @@ void __interrupt __far inthandler21(union INTPACK r) {
         if (glob_lfn_openerr != 0) {
           r.w.ax = glob_lfn_openerr;
           r.w.flags |= INTR_CF;
+          return;
+        }
+        if (glob_lfn_pdop == 0x4303u) {
+          /* 7143h BL=3 has no classic by-path equivalent, so do what DOSLFN's
+           * own fallback mode does on drives it cannot reach sector-wise:
+           * open the alias read-only, 5701h on that handle, close. 5701h only
+           * stamps the SFT (time + SFT_FDATE); the close carries both to the
+           * server as CLSFIL, which applies the time there -- the same path
+           * COPY's own 5701h takes. The handle and the deferred error live in
+           * resident globals: nothing may be held across a pass-down in a
+           * register or BP-relative local (see lfn_passdown). */
+          lfn_passdown(0x3D00u, 0, 0,
+                       (unsigned short)(unsigned char near *)glob_lfn_openpath,
+                       0);
+          if (glob_lfn_pdfl & 0x0001) {
+            r.w.ax = glob_lfn_pdax;
+            r.w.flags |= INTR_CF;
+            return;
+          }
+          glob_lfn_pdhnd = glob_lfn_pdax;
+          lfn_passdown(0x5701u, glob_lfn_pdhnd, r.w.cx, r.w.di, 0);
+          glob_lfn_pderr = (glob_lfn_pdfl & 0x0001) ? glob_lfn_pdax : 0;
+          lfn_passdown(0x3E00u, glob_lfn_pdhnd, 0, 0, 0);
+          if ((glob_lfn_pderr == 0) && (glob_lfn_pdfl & 0x0001))
+            glob_lfn_pderr = glob_lfn_pdax;
+          if (glob_lfn_pderr != 0) {
+            r.w.ax = glob_lfn_pderr;
+            r.w.flags |= INTR_CF;
+          } else {
+            r.w.ax = 0; /* RBIL defines no AX on success; callers (NC) treat
+                           AX=7100h as "unsupported" even with CF clear */
+            r.w.flags &= ~INTR_CF;
+          }
           return;
         }
         pcxin = (glob_lfn_pdop == 0x4301u) ? r.w.cx : 0;
